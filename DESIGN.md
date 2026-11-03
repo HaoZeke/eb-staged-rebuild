@@ -84,6 +84,18 @@ Not built. It is a different install layout, and it does not fix a binary whose 
 * An EasyBuild configuration file can still enable `remove-ghost-install-dirs`. The one run described above did not delete the live tree. The staged module tree is removed before `eb` so a resume does not recreate the condition the option acts on. That is not a test of every EasyBuild configuration.
 * The original `software/<name>/<version>` directory remains forever unless an operator removes it by hand. Disk use grows with every generation that is still inside the grace period, and with that original directory after it is no longer the published root.
 
+## Retiring a copy that moved elsewhere
+
+A package can be installed in this tree and later published somewhere that sits further along `MODULEPATH`, such as a CVMFS repository. Once that copy is verified, this tree's module file must stop being what users load, and running jobs must keep their software directory.
+
+`retire` does this with the publish primitive. The module file is fsynced and moved with one `os.replace` to `<state-root>/retired/<timestamp>/<absolute path without the leading />`, then both directories are fsynced. A reader sees the module file or does not; a job that already loaded it keeps its paths. The software directory is not touched. A rename across filesystems is not atomic, so retire checks `st_dev` of the module directory against the destination and refuses with an error naming both when they differ.
+
+The record is a journal under `runs/retire-<timestamp>/` in the run journal format, with `kind` set to `retire`, the module path, the module hash, the software directory parsed from the module's root assignment, the reason, and the times. It is written as `retiring` before the rename and `retired` after it, so a crash between the two leaves a state `rollback` can resolve. A module file without a root assignment is refused, because the record would not know which directory it released. Retire also refuses a module path that is not a regular file (a symlink, a directory, a missing path), one already retired, and one whose state root lock is held (`--lock-timeout` defaults to 0, so it refuses at once).
+
+`rollback retire-<timestamp>` moves the file back with the same primitive and journals `rolled_back`. It refuses to overwrite a module file that exists again at the original path.
+
+`gc` starts the grace clock at `retired_at`. The software directory is eligible only when `--grace-hours` have passed and no module file this tool tracks resolves inside it. Tracked files are the live modules of publish runs and the original path of any retire that was rolled back or interrupted. `gc` deletes only under `<state-root>/generations/`, and the retired software directory is normally the original `software/<name>/<version>` tree, outside it. So `gc` does not delete it. It reports the directory as `manual` with "ready to remove by hand after <time>", and as `keep` before that time. The one case `gc` deletes is a retired module whose software directory lies inside a generation: the retire time counts as that generation's retirement time, and the generation is removed with the usual rules. Widening what `gc` may delete to include the original install trees would let one wrong journal entry remove a directory a tool outside this one still loads, and nothing here can see those users.
+
 ## open-004
 
 Still open. This machine is not a build node on the shared filesystem, and it is not the CI account. The probe reports bubblewrap, `user.max_user_namespaces`, `RENAME_EXCHANGE` on the directory you point it at, and the EasyBuild version it can see. Those answers are about the host that ran the probe.

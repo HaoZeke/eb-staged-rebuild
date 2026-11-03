@@ -45,12 +45,24 @@ eb-staged-rebuild resume --state-root /path/to/.eb-staged-rebuild RUN_ID
 eb-staged-rebuild rollback --state-root /path/to/.eb-staged-rebuild RUN_ID
 ```
 
-`rollback` restores the previous module files and leaves the generation on disk. `gc` removes a retired generation only after `--grace-hours` (default 144, from the notes, not a measured site limit) and only under the state directory's `generations/` folder.
+`rollback` restores the previous module files and leaves the generation on disk. For a retire it puts the module file back. `gc` removes a retired generation only after `--grace-hours` (default 144, from the notes, not a measured site limit) and only under the state directory's `generations/` folder.
 
 ```bash
 eb-staged-rebuild gc --state-root /path/to/.eb-staged-rebuild --dry-run
 eb-staged-rebuild resolve /path/to/modules/all/Name/version.lua
 ```
+
+When a package installed here is later published elsewhere on `MODULEPATH` (for example a CVMFS repository), `retire` moves its module file out of the module tree, so users load the other copy, without touching `software/<name>/<version>`:
+
+```bash
+eb-staged-rebuild retire \
+  --state-root /path/to/.eb-staged-rebuild \
+  --module-file /path/to/modules/all/Name/version.lua \
+  --reason "published on software.surf.nl" \
+  --dry-run
+```
+
+Drop `--dry-run` to move the file. `rollback` with the printed `retire-<timestamp>` id puts it back. `gc` lists the software directory as ready to remove by hand once `--grace-hours` have passed. The state root must be on the same filesystem as the module tree.
 
 The operator notes are in [docs/runbook.md](docs/runbook.md). The choice of design is in [DESIGN.md](DESIGN.md).
 
