@@ -10,6 +10,7 @@ from eb_staged_rebuild.engine import Spec, describe_module, resume, rollback, ru
 from eb_staged_rebuild.errors import NeedsIntervention, Refused, StagedRebuildError
 from eb_staged_rebuild.gc import collect
 from eb_staged_rebuild.journal import list_journals
+from eb_staged_rebuild.retire import retire
 from eb_staged_rebuild.probe import probe_all
 
 
@@ -77,7 +78,7 @@ def _parser():
     resume_p.add_argument("--lock-timeout", type=float, default=None)
     resume_p.add_argument("run_id")
 
-    back_p = sub.add_parser("rollback", help="restore the previous module files")
+    back_p = sub.add_parser("rollback", help="restore the previous module files, or put a retired module file back")
     back_p.add_argument("--state-root", required=True)
     back_p.add_argument("--lock-timeout", type=float, default=None)
     back_p.add_argument("run_id")
@@ -91,6 +92,16 @@ def _parser():
         action="store_true",
         help="also remove failed runs that published nothing and are older than the grace period",
     )
+
+    retire_p = sub.add_parser(
+        "retire",
+        help="move a module file out of the module tree after its package is published elsewhere",
+    )
+    retire_p.add_argument("--state-root", required=True)
+    retire_p.add_argument("--module-file", required=True, help="module file to retire")
+    retire_p.add_argument("--reason", default=None)
+    retire_p.add_argument("--dry-run", action="store_true")
+    retire_p.add_argument("--lock-timeout", type=float, default=0.0, help="seconds to wait for the lock (default: refuse at once)")
 
     status_p = sub.add_parser("status", help="show run journals")
     status_p.add_argument("--state-root", required=True)
@@ -174,6 +185,15 @@ def _dispatch(args):
         for action in actions:
             print(f"{action['action']}: {action['path']} ({action['reason']})")
         return 0
+    if args.command == "retire":
+        result = retire(
+            args.state_root,
+            args.module_file,
+            reason=args.reason,
+            dry_run=args.dry_run,
+            lock_timeout=args.lock_timeout,
+        )
+        return result.returncode
     if args.command == "status":
         journals = list_journals(args.state_root)
         if args.run_id:
@@ -184,6 +204,10 @@ def _dispatch(args):
             print("no runs")
             return 0
         for journal in journals:
+            if journal.get("kind") == "retire":
+                print(f"{journal.get('run_id')}  {journal.get('state')}  retire  {journal.get('module_path')}")
+                print(f"  software directory {journal.get('software_dir')}")
+                continue
             modules = journal.get("modules_plan") or []
             published = sum(1 for mod in modules if mod.get("status") == "published")
             print(

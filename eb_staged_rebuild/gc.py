@@ -15,21 +15,40 @@ This does not search other installations for ``DT_RPATH`` or user scripts that
 embed the old path. An unreferenced generation with no retirement record is
 kept and reported. Paths outside ``generations/`` are never deleted, including
 the original ``software/<name>/<version>`` directory.
+
+A module file moved aside by ``retire`` starts the same clock for the software
+directory it named. Inside ``generations/`` that directory is removed with its
+generation. Anywhere else it is only reported, as ``manual``, once the grace
+period has passed and no tracked module file resolves inside it. gc does not
+delete outside ``generations/``.
 """
 
 import os
 import shutil
+import time
 
 from eb_staged_rebuild.atomicio import read_bytes
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
 from eb_staged_rebuild.modulefile import parse_root
 from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
+from eb_staged_rebuild.retire import is_retire
 
 
 def _live_roots(journals):
     roots = set()
     for journal in journals:
+        if is_retire(journal):
+            # A retire that is not complete, or that was rolled back, leaves the
+            # module file live at its original path.
+            if journal.get("state") != "retired" and lstat_kind(journal["module_path"]) == "file":
+                try:
+                    _syntax, root = parse_root(read_bytes(journal["module_path"]).decode("utf-8"))
+                except (OSError, UnicodeError):
+                    continue
+                if root:
+                    roots.add(abspath(root))
+            continue
         for mod in journal.get("modules_plan") or []:
             live = mod.get("live_module")
             if not live or lstat_kind(live) != "file":
@@ -57,6 +76,12 @@ def _superseded_at(journal, journals):
     times = []
     for other in journals:
         if other.get("run_id") == journal.get("run_id"):
+            continue
+        if is_retire(other):
+            if other.get("state") == "retired" and other.get("retired_at") and is_within(
+                abspath(other["software_dir"]), generation
+            ):
+                times.append(other["retired_at"])
             continue
         for mod in other.get("modules_plan") or []:
             if mod.get("status") != "published":
@@ -96,7 +121,7 @@ def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
     actions = []
     for journal in journals:
         generation = journal.get("generation_root")
-        if not generation:
+        if is_retire(journal) or not generation:
             continue
         generation = abspath(generation)
         if not is_within(generation, generations):
@@ -130,4 +155,55 @@ def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
         journal["generation_removed_at"] = now
         journal["message"] = f"generation removed ({why})"
         save_journal(journal_path(state_root, journal["run_id"]), journal, None, "journal.gc")
+    actions.extend(_retired_software(journals, roots, generations, grace_hours, now))
+    return actions
+
+
+def _iso(when):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+
+
+def _retired_software(journals, roots, generations, grace_hours, now):
+    """Report software directories of retired module files that gc may not delete itself.
+
+    A directory inside ``generations/`` is handled with its generation. The rest
+    is never deleted: the entry is ``keep`` while a tracked module still resolves
+    inside it or the grace period runs, then ``manual``.
+    """
+    latest = {}
+    for journal in journals:
+        if not is_retire(journal) or journal.get("state") != "retired":
+            continue
+        directory = abspath(journal["software_dir"])
+        if is_within(directory, generations):
+            continue
+        when = journal.get("retired_at")
+        if when is None:
+            continue
+        latest[directory] = max(latest.get(directory, when), when)
+    actions = []
+    for directory in sorted(latest):
+        if not os.path.isdir(directory):
+            continue
+        ready = latest[directory] + grace_hours * 3600
+        if _referenced(directory, roots):
+            actions.append({"path": directory, "action": "keep", "reason": "a live module resolves inside it"})
+        elif now < ready:
+            actions.append(
+                {
+                    "path": directory,
+                    "action": "keep",
+                    "reason": f"within grace (retired module); ready to remove by hand after {_iso(ready)}",
+                    "retired_at": latest[directory],
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "path": directory,
+                    "action": "manual",
+                    "reason": f"ready to remove by hand after {_iso(ready)}; gc deletes only under generations/",
+                    "retired_at": latest[directory],
+                }
+            )
     return actions

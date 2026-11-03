@@ -671,6 +671,10 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
     lock.acquire(lock_timeout)
     try:
         journal = load_journal(path)
+        if journal.get("kind") == "retire":
+            from eb_staged_rebuild.retire import rollback_retire
+
+            return rollback_retire(state_root, journal, faults, now)
         if journal["state"] == "rolled_back" and all(
             mod.get("status") == "restored" for mod in journal.get("modules_plan") or []
         ):
