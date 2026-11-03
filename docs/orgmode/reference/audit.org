@@ -72,6 +72,54 @@ notes.
 11. The tests emitted many =ResourceWarning= messages because fixtures used
     unclosed =open(...)= handles. The suite passed, but warning-clean execution
     was not achieved.
+12. The runbook said a symlink at =software/Name/version= or the module file
+    stops the run before EasyBuild. That was true only when =--module= or the
+    preflight parser already knew the software relative path. Module-file
+    symlinks and newly discovered install paths were refused in planning after
+    EasyBuild had run.
+13. The runbook said a zero =user.max_user_namespaces= makes the bwrap backend
+    refuse. The code reported that sysctl but gated only on the executable
+    bwrap probe. A supported setuid bwrap could succeed with a zero sysctl, so
+    the literal claim and enforcement differed.
+14. The runbook described the lock as covering the start of the build through
+    publish. The normal run executed an EasyBuild =--dry-run= module preflight
+    before taking the lock. It also did not document that normal operation can
+    invoke EasyBuild twice.
+15. Dry-run checked a named software-directory symlink, but it did not check
+    the corresponding live module file symlink. The runbook's symlink section
+    did not distinguish this dry-run exception.
+16. Public behavior was undocumented for =--run-id=, =--lock-timeout=,
+    =--skip-live-check=, =EB_STAGED_REBUILD_STATE_ROOT=,
+    =EB_STAGED_REBUILD_GRACE_HOURS=, and =EB_STAGED_REBUILD_EB=.
+17. =gc= did not acquire the run lock. A collector could race a publish or
+    rollback, despite the broader lock-and-journal safety story. Separate
+    state roots also meant separate locks could target the same live trees.
+18. =atomic_write='s explanatory string appeared after an executable
+    statement, so Python did not expose it as the function docstring.
+19. One corrupt journal made =status= fail while listing all runs; the
+    operator documentation did not describe that failure mode.
+20. A refusal or crash partway through planning could leave prepared module
+    files and completion stamps while the journal still said =building=. The
+    cleanup/retry behavior for those partial planning artifacts was not
+    documented.
+21. =resolve= accepted the pre-publish completion stamp as sufficient. A
+    staged directory could therefore report =complete= before it had ever
+    been published; the runbook listed the stamp but did not distinguish
+    staged from live completeness.
+22. The README said the real bwrap integration is a strict prerequisite test
+    once integration testing is enabled, but the bwrap case skipped when the
+    host probe failed. Missing EasyBuild and Lmod were failures; missing usable
+    bwrap was not.
+
+* Documented guarantees without a dedicated baseline test
+
+The baseline fault sweep covered many of these paths indirectly, but it had no
+focused assertion for: live-manifest refusal; dry-run refusal status 2;
+=gc --include-failed=; symlinked staged =modules/=; class-link creation and
+rollback failures; resume from every table state; lock coverage across a
+blocked build; unknown/current module hash intervention; and a corrupt
+journal during =status=. These are coverage gaps, not proof that the code
+behaved differently.
 
 * Correctly implemented design points at 8e7b6d66
 
