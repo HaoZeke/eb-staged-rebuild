@@ -134,6 +134,58 @@ eb-staged-rebuild retire \
 `retire-<timestamp>` id puts the module file back. The state root and the
 module tree must be the same filesystem.
 
+## Command reference
+
+`eb-staged-rebuild --version` prints the version. `eb-staged-rebuild --help`
+lists the subcommands `probe`, `run`, `resume`, `rollback`, `gc`, `retire`,
+`status`, and `resolve`.
+
+`probe --path DIR --eb EB --json` reports bubblewrap, the user-namespace
+sandbox, `RENAME_EXCHANGE`, and EasyBuild. `--eb` is the EasyBuild executable.
+The environment variable `EB_STAGED_REBUILD_EB` is the default (`eb` when
+unset). `--json` prints the same report as one JSON object.
+
+`run` accepts `--software`, `--modules`, `--state-root`, `--eb`, `--backend`,
+`--grace-hours`, `--dry-run`, `--module`, `--run-id`, `--lock-timeout`, and
+`--skip-live-check`, then the easyconfig after `--`.
+
+* `--software` and `--modules` default to `EASYBUILD_INSTALLPATH_SOFTWARE` and
+  `EASYBUILD_INSTALLPATH_MODULES`.
+* `--state-root` defaults to `EB_STAGED_REBUILD_STATE_ROOT`, or else a hidden
+  sibling of the software tree named `.eb-staged-rebuild`.
+* `--backend` is `auto`, `bwrap`, `userns`, or `installpath`.
+* `--grace-hours` defaults to `EB_STAGED_REBUILD_GRACE_HOURS`, or else 144.
+* `--run-id` forces the journal id. The default is a UTC stamp plus the pid.
+* `--lock-timeout SECONDS` waits that long for the state-root lock and then
+  refuses. Omit it and the wait has no deadline.
+* `--module NAME/VERSION` checks that live directory before the build. Repeat
+  it for each known install.
+* `--skip-live-check` does not record file contents before the build and does
+  not refuse when those contents change before publish.
+
+`resume --state-root DIR --lock-timeout SECONDS RUN_ID` continues one journal.
+A retire record is refused; use `rollback` for that id.
+
+`rollback --state-root DIR --lock-timeout SECONDS RUN_ID` swaps a published
+tree back, or puts a retired module file back.
+
+`gc --state-root DIR --grace-hours HOURS --lock-timeout SECONDS --dry-run
+--include-failed` removes a hidden sibling once the grace period has passed.
+`--include-failed` also removes the hidden sibling recorded for a failed run
+whose modules are still pending, once the grace period has passed. It does not
+delete the stable software directory named by `retire`.
+
+`retire --state-root DIR --module-file PATH --reason TEXT --dry-run
+--lock-timeout SECONDS` moves one module file aside. `--lock-timeout` defaults
+to 0.
+
+`status --state-root DIR [RUN_ID]` prints journals. A retire journal includes
+the software directory it left in place.
+
+`resolve MODULE` prints JSON for one module file: its syntax, the install path
+it names, and whether that directory looks complete. The exit status is 1 when
+the path is not a complete install.
+
 ## Site gates (`open-004`)
 
 Before enabling the wrapper:

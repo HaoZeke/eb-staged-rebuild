@@ -37,9 +37,20 @@ eb-staged-rebuild run \
   -- example.eb --robot
 ```
 
-`--backend auto` is the default. Use `--backend bwrap` or
-`--backend userns` when an unsandboxed fallback must be forbidden. Use
-`--backend installpath` only when the documented fallback is acceptable.
+`--backend auto` is the default. The choices are `auto`, `bwrap`, `userns`,
+and `installpath`. Use `--backend bwrap` or `--backend userns` when an
+unsandboxed fallback must be forbidden. Use `--backend installpath` only when
+the documented fallback is acceptable.
+
+`--eb` selects the EasyBuild executable (environment `EB_STAGED_REBUILD_EB`,
+default `eb`). `--run-id` names the journal instead of the generated id.
+`--lock-timeout` is how long to wait for `<state-root>/.lock`, in seconds;
+omitted, the wait has no deadline, and `retire` defaults to 0. `--module`
+names a `Name/version` to publish when EasyBuild's dry-run does not.
+`--skip-live-check` skips the before/after content record of the live install.
+`gc --include-failed` also removes the hidden sibling recorded for a failed
+run whose modules are still pending, once the grace period has passed.
+`resolve` prints the install path a module file names.
 
 The state directory defaults to a hidden sibling of the software tree. It must
 be on the same filesystem as the live installs.

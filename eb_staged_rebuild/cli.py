@@ -48,7 +48,7 @@ def _grace(value):
 def _add_common(parser):
     parser.add_argument("--software", help="live EASYBUILD_INSTALLPATH_SOFTWARE")
     parser.add_argument("--modules", help="live EASYBUILD_INSTALLPATH_MODULES")
-    parser.add_argument("--state-root", help="journal and generation root (default: <parent of software>/.eb-staged-rebuild)")
+    parser.add_argument("--state-root", help="journal and stage root (default: <parent of software>/.eb-staged-rebuild)")
     parser.add_argument("--eb", default=os.environ.get("EB_STAGED_REBUILD_EB", "eb"), help="EasyBuild executable")
 
 
@@ -97,7 +97,7 @@ def _parser():
     back_p.add_argument("--lock-timeout", type=float, default=None)
     back_p.add_argument("run_id")
 
-    gc_p = sub.add_parser("gc", help="remove retired generations after the grace period")
+    gc_p = sub.add_parser("gc", help="remove hidden retired siblings after the grace period")
     gc_p.add_argument("--state-root", required=True)
     gc_p.add_argument("--grace-hours", type=float, default=None)
     gc_p.add_argument("--dry-run", action="store_true")
@@ -122,7 +122,7 @@ def _parser():
     status_p.add_argument("--state-root", required=True)
     status_p.add_argument("run_id", nargs="?")
 
-    resolve_p = sub.add_parser("resolve", help="print the generation a module file points at")
+    resolve_p = sub.add_parser("resolve", help="print the install path a module file names")
     resolve_p.add_argument("module")
     return parser
 
