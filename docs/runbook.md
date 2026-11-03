@@ -57,7 +57,9 @@ eb-staged-rebuild run \
 ```
 
 The lock is `<state-root>/.lock` and remains held through build and publish.
-The file remaining after a crash is not itself a held lock.
+The module preflight `eb --dry-run` runs before that lock is taken, so a normal
+run can invoke EasyBuild twice. The file remaining after a crash is not itself
+a held lock.
 
 On success:
 

@@ -1,9 +1,13 @@
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+
+from eb_staged_rebuild.cli import main
 
 from eb_staged_rebuild.lockfile import FileLock
 from eb_staged_rebuild.errors import Refused
@@ -21,6 +25,24 @@ def _read(path):
 
 
 class ProbeTests(unittest.TestCase):
+    def test_unreadable_resolve_exits_2_without_a_traceback(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode 000 file")
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "mod.lua")
+            _write(path, 'local root = "/opt/software/demo/1"\n')
+            os.chmod(path, 0)
+            try:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(["resolve", path])
+            finally:
+                os.chmod(path, 0o644)
+        self.assertEqual(code, 2)
+        text = err.getvalue()
+        self.assertIn("eb-staged-rebuild:", text)
+        self.assertNotIn("Traceback", text)
+
     def test_rename_exchange_reports_a_result_for_this_directory(self):
         with tempfile.TemporaryDirectory() as root:
             info = probe_rename_exchange(root)

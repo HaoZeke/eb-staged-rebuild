@@ -94,7 +94,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 Set `EB_STAGED_REBUILD_INTEGRATION=1` to enable the real EasyBuild/Lmod tests.
-With that variable set, missing prerequisites are failures.
+With that variable set, missing `eb` or Lmod is a failure. The bubblewrap case
+skips when `bwrap` is not usable on that host.
 
 See [DESIGN.md](DESIGN.md), [the runbook](docs/runbook.md), and the Org-mode
 [how-to](docs/orgmode/howto/staged-rebuild.org) and

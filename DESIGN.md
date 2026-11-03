@@ -169,3 +169,48 @@ directory a job outside this tool still has open.
 5. **EasyBuild:** pin the pipeline to 5.4.2 or a newer version validated by the
    integration test. Do not rely on the inferred 5.3.0/5.3.1 JSON layout when
    a pinned, tested release is available.
+
+## Baseline divergences
+
+The audit of unmodified `8e7b6d66` listed 11 differences from the staged-rebuild
+notes and 22 differences between that tree's own documents and its code. Each
+one is closed in this tree, or kept on purpose.
+
+### Staged-rebuild notes
+
+1. Closed. Publish exchanges `software/<name>/<version>` with the staged tree.
+2. Closed. Publish and rollback call `renameat2(RENAME_EXCHANGE)` when the probe succeeds.
+3. Closed. `EINVAL`, `ENOSYS`, and `EOPNOTSUPP` select the restoring three-rename fallback.
+4. Closed. Rollback puts the previous software tree back at the stable path. A retire record is only a module file, and rollback puts that file back.
+5. Closed. `--backend auto` is the default.
+6. Closed. The order is bubblewrap, then the user namespace, then installpath.
+7. Closed. Tests inject exchange failures, each ordinary-rename step, and restoration of a failed swap.
+8. Closed. A successful publish changes the live directory inode. Tests require the new bytes at that path.
+9. Closed. A caught failure reverses every completed swap and module-file update in that transaction.
+10. Closed. Each `open-004` measurement has a recommended answer above.
+11. Closed. `CHANGELOG.md` and the Org-mode how-to and reference describe the swap.
+
+### Repository documents at `8e7b6d66`
+
+1. Closed. Dependency order reads Lua `load` and `depends_on`, and Tcl `module load`. A cycle still finishes in path order.
+2. Closed. The live-change record includes a SHA-256 of each file's contents.
+3. Closed. `--skip-live-check` is documented. It skips that record.
+4. Closed. A `--module` value or a parsed module path that leaves the software or module root is refused.
+5. Closed. Symlink components of a module path are refused even when the file itself is still missing.
+6. Closed. Stage roots taken from `bwrap_info.json` must stay inside the run's generation directory.
+7. Closed. A missing `Name/version` is refused before EasyBuild. The build does not create the live directory.
+8. Closed. The temporary file for an atomic write is created with `mkstemp`, so the name is not a fixed hard-link target.
+9. Closed. The state root is refused when any existing component is a symlink.
+10. Closed. An `OSError` from the command line is printed as `eb-staged-rebuild:` and exits 2, without a traceback.
+11. Closed. The unit suite passes with `ResourceWarning` promoted to an error.
+12. Intended. The module preflight can run before a software-symlink refusal. The install build does not. A module-file symlink is refused in planning, after the build and before any swap, because the path may be known only from that preflight.
+13. Intended. Bubblewrap is accepted when `bwrap --dev-bind / / true` succeeds. `user.max_user_namespaces` is reported. A zero value does not by itself refuse a setuid bubblewrap that passes the probe.
+14. Closed. The runbook states that the preflight runs before the lock and that EasyBuild may run twice. The lock covers build, publish, resume, rollback, retire, and garbage collection.
+15. Intended. Dry-run checks the software directory named by `--module`. It does not check the live module file. That file is checked when a real run plans the publish.
+16. Closed. `--run-id`, `--lock-timeout`, `--skip-live-check`, `--eb`, `EB_STAGED_REBUILD_EB`, `EB_STAGED_REBUILD_STATE_ROOT`, and `EB_STAGED_REBUILD_GRACE_HOURS` are documented.
+17. Closed for the collector: `gc` holds the state-root lock. Intended for the rest: two state roots are two locks, even when both runs name the same live trees. One state root per live tree is the deployment rule.
+18. Closed. The explanation of `atomic_write` is its docstring.
+19. Intended. One unreadable journal makes `status` stop. A partial list would hide the broken run.
+20. Intended. A crash during planning can leave prepared module files while the journal still says `building`. `resume` from `building` rebuilds that generation.
+21. Intended. `resolve` calls a directory complete when it contains install metadata, including the stamp written before publish. That means the tree is complete, not that it is already the live path.
+22. Closed. With integration enabled, missing `eb` or Lmod fails the test. The bubblewrap case skips when that probe fails, and the README says so.

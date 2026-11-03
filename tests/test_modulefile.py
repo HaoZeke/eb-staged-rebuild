@@ -1,6 +1,6 @@
 import unittest
 
-from eb_staged_rebuild.modulefile import parse_root, replace_path, rewrite_root
+from eb_staged_rebuild.modulefile import loads, parse_root, replace_path, rewrite_root
 from eb_staged_rebuild.errors import Refused
 
 
@@ -20,6 +20,12 @@ setenv("EBVERSIONSTAGEDEMO", "1")
 
 
 class ModuleFileTests(unittest.TestCase):
+    def test_lua_and_tcl_loads_are_dependencies(self):
+        lua = 'load("lib/1")\ndepends_on("app/2")\n'
+        tcl = "set root /opt/software/demo/1\nmodule load {lib/1}\nmodule load app/2\n"
+        self.assertEqual(loads(lua), ["lib/1", "app/2"])
+        self.assertEqual(loads(tcl), ["lib/1", "app/2"])
+
     def test_parse_lua_and_tcl(self):
         self.assertEqual(parse_root(SAMPLE)[1], "/opt/software/stagedemo/1")
         self.assertEqual(parse_root('set root /opt/software/stagedemo/1\n')[0], "tcl")

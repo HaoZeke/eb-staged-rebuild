@@ -144,6 +144,9 @@ def main(argv=None):
     except (Refused, NeedsIntervention, StagedRebuildError) as exc:
         print(f"eb-staged-rebuild: {exc}", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"eb-staged-rebuild: {exc}", file=sys.stderr)
+        return 2
     return code
 
 
