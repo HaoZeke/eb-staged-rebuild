@@ -6,6 +6,7 @@ import os
 import sys
 
 from eb_staged_rebuild import __version__
+from eb_staged_rebuild.constants import DEFAULT_GRACE_HOURS
 from eb_staged_rebuild.engine import Spec, describe_module, resume, rollback, run
 from eb_staged_rebuild.errors import NeedsIntervention, Refused, StagedRebuildError
 from eb_staged_rebuild.gc import collect
@@ -36,7 +37,12 @@ def _state_root(value, software):
 def _grace(value):
     if value is not None:
         return value
-    return float(os.environ.get("EB_STAGED_REBUILD_GRACE_HOURS", "144"))
+    return float(
+        os.environ.get(
+            "EB_STAGED_REBUILD_GRACE_HOURS",
+            str(DEFAULT_GRACE_HOURS),
+        )
+    )
 
 
 def _add_common(parser):
@@ -50,8 +56,8 @@ def _parser():
     parser = argparse.ArgumentParser(
         prog="eb-staged-rebuild",
         description=(
-            "Rebuild EasyBuild software into a new generation directory and publish it "
-            "by replacing the module file. The live software directory is not emptied."
+            "Build EasyBuild software in a staged tree, then exchange the complete "
+            "tree with the stable live directory."
         ),
     )
     parser.add_argument("--version", action="version", version=f"eb-staged-rebuild {__version__}")
@@ -62,7 +68,7 @@ def _parser():
     probe.add_argument("--eb", default=os.environ.get("EB_STAGED_REBUILD_EB", "eb"))
     probe.add_argument("--json", action="store_true")
 
-    run_p = sub.add_parser("run", help="build a generation and publish its module files")
+    run_p = sub.add_parser("run", help="build and atomically swap a staged tree")
     _add_common(run_p)
     run_p.add_argument(
         "--backend",
@@ -225,7 +231,10 @@ def _dispatch(args):
             if journal.get("message"):
                 print(f"  {journal['message']}")
             for mod in modules:
-                print(f"  {mod.get('status'):<10} {mod.get('rel')}  {mod.get('generation')}")
+                print(
+                    f"  {mod.get('status'):<10} {mod.get('rel')}  "
+                    f"live={mod.get('live_software')} retired={mod.get('retired')}"
+                )
         return 0
     raise Refused(f"unknown command {args.command}")
 

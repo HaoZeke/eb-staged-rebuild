@@ -1,12 +1,22 @@
-"""A before/after record of a live install directory.
+"""A before/after content record of a live install directory."""
 
-The record is names, inode numbers, and sizes. It notices a directory being
-removed or recreated. It does not hash file contents.
-"""
-
+import hashlib
 import os
 
 from eb_staged_rebuild.paths import lstat_kind
+
+HASH_BLOCK_BYTES = 1024 * 1024
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(HASH_BLOCK_BYTES)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def snapshot(path):
@@ -26,7 +36,15 @@ def snapshot(path):
             child = os.path.join(dirpath, name)
             if os.path.islink(child):
                 lst = os.lstat(child)
-                rows.append([os.path.relpath(child, path), "symlink", lst.st_ino, lst.st_size])
+                rows.append(
+                    [
+                        os.path.relpath(child, path),
+                        "symlink",
+                        lst.st_ino,
+                        lst.st_size,
+                        os.readlink(child),
+                    ]
+                )
             else:
                 kept.append(name)
         dirnames[:] = kept
@@ -34,7 +52,16 @@ def snapshot(path):
             child = os.path.join(dirpath, name)
             lst = os.lstat(child)
             kind_name = "symlink" if os.path.islink(child) else "file"
-            rows.append([os.path.relpath(child, path), kind_name, lst.st_ino, lst.st_size])
+            detail = os.readlink(child) if kind_name == "symlink" else _sha256(child)
+            rows.append(
+                [
+                    os.path.relpath(child, path),
+                    kind_name,
+                    lst.st_ino,
+                    lst.st_size,
+                    detail,
+                ]
+            )
     rows.sort()
     return {
         "exists": True,

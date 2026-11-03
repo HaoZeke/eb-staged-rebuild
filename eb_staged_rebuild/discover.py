@@ -74,6 +74,31 @@ def generation_for(text, stage_software, live_software):
     )
 
 
+def swap_install_for(text, stage_software, live_software):
+    """Return the staged tree, stable live tree, and stable-path module text."""
+    kind, root = parse_root(text)
+    if kind is None or not root:
+        raise Refused("module file has no root assignment")
+    root_abs = abspath(root)
+    stage_abs = abspath(stage_software)
+    live_abs = abspath(live_software)
+    if is_within(root_abs, stage_abs):
+        relative = os.path.relpath(root_abs, stage_abs)
+        staged = root_abs
+    elif is_within(root_abs, live_abs):
+        relative = os.path.relpath(root_abs, live_abs)
+        staged = os.path.join(stage_abs, relative)
+    else:
+        raise Refused(
+            f"module root {root_abs} is outside both the stage software tree "
+            f"{stage_abs} and the live software tree {live_abs}"
+        )
+    live = os.path.join(live_abs, relative)
+    if not is_real_dir(staged):
+        raise Refused(f"staged installation is not a real directory: {staged}")
+    return staged, live, rewrite_root(text, live)
+
+
 def order_module_files(files, modules_root):
     """Publish dependencies first. A cycle falls back to path order for the rest."""
     texts = {}

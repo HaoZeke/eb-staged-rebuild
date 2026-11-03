@@ -47,7 +47,7 @@ class Watcher(threading.Thread):
     def __init__(self, path, expected):
         super().__init__(daemon=True)
         self.path = path
-        self.expected = expected
+        self.expected = set(expected)
         self.stop = threading.Event()
         self.samples = 0
         self.bad = 0
@@ -64,7 +64,7 @@ class Watcher(threading.Thread):
             else:
                 with open(self.path, encoding="utf-8") as handle:
                     data = handle.read()
-                if data != self.expected:
+                if data not in self.expected:
                     self.bad += 1
                     if len(self.notes) < 5:
                         self.notes.append(f"sample {self.samples}: {data!r}")
@@ -145,14 +145,14 @@ class EasyBuildIntegrationTests(unittest.TestCase):
         self.stop_watcher(watcher)
         self.assertEqual(watcher.bad, 0, watcher.notes)
         self.assertGreater(watcher.samples, 0)
-        self.assertEqual(os.lstat(live).st_ino, inode)
+        self.assertNotEqual(os.lstat(live).st_ino, inode)
         with open(os.path.join(live, "stagedemo-1.txt"), encoding="utf-8") as handle:
-            self.assertEqual(handle.read(), "payload-v1\n")
+            self.assertEqual(handle.read(), generation_payload)
         with open(module, encoding="utf-8") as handle:
             text = handle.read()
         _syntax, root = parse_root(text)
         self.assertEqual(lstat_kind(root), "dir")
-        self.assertNotEqual(os.path.realpath(root), os.path.realpath(live))
+        self.assertEqual(os.path.realpath(root), os.path.realpath(live))
         with open(os.path.join(root, "stagedemo-1.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), generation_payload)
         print(
@@ -170,7 +170,10 @@ class EasyBuildIntegrationTests(unittest.TestCase):
             prefix, src, ec, live, module = self._install_v1(work)
             inode = os.lstat(live).st_ino
             self._retarget(src, ec, "payload-v2\n")
-            watcher = Watcher(os.path.join(live, "stagedemo-1.txt"), "payload-v1\n")
+            watcher = Watcher(
+                os.path.join(live, "stagedemo-1.txt"),
+                {"payload-v1\n", "payload-v2\n"},
+            )
             watcher.start()
             try:
                 result = self._rebuild(prefix, ec, src, "installpath")
@@ -189,7 +192,10 @@ class EasyBuildIntegrationTests(unittest.TestCase):
             prefix, src, ec, live, module = self._install_v1(work)
             inode = os.lstat(live).st_ino
             self._retarget(src, ec, "payload-v2\n")
-            watcher = Watcher(os.path.join(live, "stagedemo-1.txt"), "payload-v1\n")
+            watcher = Watcher(
+                os.path.join(live, "stagedemo-1.txt"),
+                {"payload-v1\n", "payload-v2\n"},
+            )
             watcher.start()
             try:
                 result = self._rebuild(prefix, ec, src, "bwrap")

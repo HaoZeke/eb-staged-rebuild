@@ -114,16 +114,16 @@ def recover_interrupted_swap(live, staged, rename=os.rename):
         raise NeedsIntervention(f"fallback recovery left its hold path behind: {hold}")
 
 
-def _fallback_swap(live, staged, faults, rename):
+def _fallback_swap(live, staged, faults, rename, step_prefix):
     hold = staged + FALLBACK_HOLD_SUFFIX
     if lstat_kind(hold) != "missing":
         recover_interrupted_swap(live, staged, rename)
     try:
-        faults.reach("swap.fallback.live-to-hold")
+        faults.reach(f"{step_prefix}.fallback.live-to-hold")
         rename(live, hold)
-        faults.reach("swap.fallback.staged-to-live")
+        faults.reach(f"{step_prefix}.fallback.staged-to-live")
         rename(staged, live)
-        faults.reach("swap.fallback.hold-to-staged")
+        faults.reach(f"{step_prefix}.fallback.hold-to-staged")
         rename(hold, staged)
         _sync_parent(live)
     except BaseException:
@@ -145,6 +145,7 @@ def swap_directories(
     faults=None,
     rename=os.rename,
     exchange_call=None,
+    step_prefix="swap",
 ):
     """Exchange sibling directories and restore them after every caught failure.
 
@@ -159,10 +160,10 @@ def swap_directories(
     if allow_exchange:
         exchanged = False
         try:
-            faults.reach("swap.exchange.before")
+            faults.reach(f"{step_prefix}.exchange.before")
             exchange_call(live, staged)
             exchanged = True
-            faults.reach("swap.exchange.after")
+            faults.reach(f"{step_prefix}.exchange.after")
             _sync_parent(live)
             return SwapResult("renameat2-exchange")
         except OSError as error:
@@ -188,4 +189,4 @@ def swap_directories(
                         f"{recovery_error}"
                     ) from recovery_error
             raise
-    return _fallback_swap(live, staged, faults, rename)
+    return _fallback_swap(live, staged, faults, rename, step_prefix)

@@ -45,20 +45,22 @@ def _protect(path):
     if not os.path.isdir(path) or os.path.islink(path):
         raise RuntimeError(f"read-only sandbox path is not a real directory: {path}")
     _mount(path, path, MS_BIND | MS_REC)
-    _mount(None, path, MS_BIND | MS_REMOUNT | MS_RDONLY)
+    _mount(path, path, MS_BIND | MS_REMOUNT | MS_RDONLY)
 
 
 def _probe():
-    with tempfile.TemporaryDirectory() as root:
-        _protect(root)
-        try:
-            with open(os.path.join(root, "must-fail"), "w", encoding="utf-8"):
-                pass
-        except OSError as error:
-            if error.errno == errno.EROFS:
-                return 0
-            raise
-        raise RuntimeError("read-only bind mount remained writable")
+    # The mount disappears with this private namespace. Trying to remove its
+    # mountpoint before namespace exit would correctly fail with EBUSY.
+    root = tempfile.mkdtemp()
+    _protect(root)
+    try:
+        with open(os.path.join(root, "must-fail"), "w", encoding="utf-8"):
+            pass
+    except OSError as error:
+        if error.errno == errno.EROFS:
+            return 0
+        raise
+    raise RuntimeError("read-only bind mount remained writable")
 
 
 def _parser():

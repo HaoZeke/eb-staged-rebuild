@@ -1,7 +1,7 @@
-"""Crash between every publish step. The live module stays on a complete generation."""
+"""End-to-end transaction tests, including every recorded fault point."""
 
+import json
 import os
-import shutil
 import tempfile
 import unittest
 
@@ -9,43 +9,11 @@ from eb_staged_rebuild.engine import Spec, resume, rollback, run
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.faults import FaultInjector, InjectedCrash
 from eb_staged_rebuild.gc import collect
+from eb_staged_rebuild.journal import journal_path, load_journal
 from eb_staged_rebuild.modulefile import parse_root
-from eb_staged_rebuild.paths import abspath, lstat_kind
-from tests.support import (
-    PROBES,
-    classic_install,
-    generation_of,
-    guard_calls,
-    installpath_builder,
-    lua,
-    patch_os,
-    restore_os,
-)
-
-
-def _tree(root):
-    software = os.path.join(root, "software")
-    modules = os.path.join(root, "modules")
-    state = os.path.join(root, "state")
-    os.makedirs(software)
-    os.makedirs(modules)
-    return software, modules, state
-
-
-def _spec(software, modules, state, builder, run_id, rels, faults=None, clock=None):
-    return Spec(
-        software=software,
-        modules=modules,
-        state_root=state,
-        eb_args=["demo-1.eb"],
-        backend="installpath",
-        module_rels=rels,
-        builder=builder,
-        faults=faults or FaultInjector(),
-        run_id=run_id,
-        probes=PROBES,
-        clock=clock,
-    )
+from eb_staged_rebuild.paths import lstat_kind
+from eb_staged_rebuild.swap import FALLBACK_HOLD_SUFFIX
+from tests.support import PROBES, classic_install, installpath_builder
 
 
 class Clock:
@@ -57,443 +25,326 @@ class Clock:
         return self.now
 
 
-class FaultTests(unittest.TestCase):
-    def _one(self, root):
-        software, modules, state = _tree(root)
-        install, module, v0 = classic_install(
-            software, modules, "demo/1", "v0\n", "all/demo/1.lua"
+def _fixture(root, *, two=False):
+    software = os.path.join(root, "software")
+    modules = os.path.join(root, "modules")
+    state = os.path.join(root, "state")
+    os.makedirs(software)
+    os.makedirs(modules)
+    packages = []
+    installed = {}
+    rows = (
+        ("lib", "lib-v0\n", "lib-v1\n"),
+        ("app", "app-v0\n", "app-v1\n"),
+    ) if two else (("demo", "v0\n", "v1\n"),)
+    for name, old, new in rows:
+        rel = f"{name}/1"
+        module_rel = f"all/{name}/1.lua"
+        install, module, module_text = classic_install(
+            software,
+            modules,
+            rel,
+            old,
+            module_rel,
+            name=name,
+            loads=("lib/1",) if name == "app" else (),
         )
-        inode = os.lstat(install).st_ino
-        builder = installpath_builder(
-            [
-                {
-                    "rel": "demo/1",
-                    "payload": "v1\n",
-                    "module_rel": "all/demo/1.lua",
-                    "link_rel": "tools/demo/1.lua",
-                }
-            ]
+        installed[rel] = {
+            "install": install,
+            "module": module,
+            "module_text": module_text,
+            "inode": os.lstat(install).st_ino,
+            "old": old,
+            "new": new,
+        }
+        packages.append(
+            {
+                "rel": rel,
+                "payload": new,
+                "module_rel": module_rel,
+                "name": name,
+                "loads": ("lib/1",) if name == "app" else (),
+            }
         )
-        v1_root = generation_of(state, "run1", "demo/1")
-        v1 = lua(v1_root)
-        return software, modules, state, install, module, v0, v1, inode, builder
+    return software, modules, state, installed, installpath_builder(packages)
 
-    def _check(self, module, v0, v1, install, inode):
-        self.assertEqual(os.lstat(install).st_ino, inode)
-        self.assertEqual(open(os.path.join(install, "PAYLOAD"), encoding="utf-8").read(), "v0\n")
-        self.assertEqual(lstat_kind(module), "file")
-        text = open(module, encoding="utf-8").read()
-        self.assertIn(text, {v0, v1})
-        _syntax, root = parse_root(text)
-        self.assertEqual(lstat_kind(root), "dir")
-        payload = open(os.path.join(root, "PAYLOAD"), encoding="utf-8").read()
-        if text == v0:
-            self.assertEqual(payload, "v0\n")
-            self.assertEqual(abspath(root), abspath(install))
-        else:
-            self.assertEqual(payload, "v1\n")
 
-    def test_success_then_every_fault_then_resume(self):
+def _spec(
+    software,
+    modules,
+    state,
+    builder,
+    *,
+    run_id="run1",
+    faults=None,
+    probes=None,
+    clock=None,
+):
+    rels = ["lib/1", "app/1"] if os.path.isdir(os.path.join(software, "lib")) else ["demo/1"]
+    return Spec(
+        software=software,
+        modules=modules,
+        state_root=state,
+        eb_args=["demo-1.eb"],
+        backend="installpath",
+        module_rels=rels,
+        builder=builder,
+        faults=faults or FaultInjector(),
+        run_id=run_id,
+        probes=probes or PROBES,
+        clock=clock,
+    )
+
+
+def _payload(path):
+    with open(os.path.join(path, "PAYLOAD"), encoding="utf-8") as handle:
+        return handle.read()
+
+
+class TransactionTests(unittest.TestCase):
+    def assert_old_live(self, installed):
+        for row in installed.values():
+            self.assertEqual(lstat_kind(row["install"]), "dir")
+            self.assertEqual(os.lstat(row["install"]).st_ino, row["inode"])
+            self.assertEqual(_payload(row["install"]), row["old"])
+            with open(row["module"], encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), row["module_text"])
+            parent = os.path.dirname(row["install"])
+            for name in os.listdir(parent):
+                if name.startswith(f".{os.path.basename(row['install'])}."):
+                    self.assertFalse(
+                        os.path.lexists(os.path.join(parent, name) + FALLBACK_HOLD_SUFFIX)
+                    )
+
+    def assert_new_live(self, installed):
+        for row in installed.values():
+            self.assertEqual(lstat_kind(row["install"]), "dir")
+            self.assertNotEqual(os.lstat(row["install"]).st_ino, row["inode"])
+            self.assertEqual(_payload(row["install"]), row["new"])
+            with open(row["module"], encoding="utf-8") as handle:
+                module_text = handle.read()
+            self.assertEqual(parse_root(module_text)[1], row["install"])
+
+    def test_success_uses_fallback_and_keeps_old_tree_for_rollback(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, v1, inode, builder = self._one(root)
-            spec = _spec(software, modules, state, builder, "record", ["demo/1"])
-            # A recording run uses its own tree so the crash runs start clean.
-            result = run(spec)
+            software, modules, state, installed, builder = _fixture(root)
+            result = run(_spec(software, modules, state, builder))
             self.assertEqual(result.returncode, 0, result.message)
-            steps = list(spec.faults.reached)
-            self.assertIn("publish.file:all/demo/1.lua.rename", steps)
-            self.assertIn("publish.backup:all/demo/1.lua.rename", steps)
-            self.assertIn("journal.module:all/demo/1.lua.rename", steps)
-            self.assertIn("build.payload:demo/1", steps)
-            self.assertIn("build.module:demo/1", steps)
+            self.assert_new_live(installed)
+            journal = load_journal(journal_path(state, "run1"))
+            mod = journal["modules_plan"][0]
+            self.assertEqual(mod["swap_method"], "rename-fallback")
+            self.assertEqual(_payload(mod["retired"]), "v0\n")
 
-        for step in steps:
-            with self.subTest(step=step):
-                with tempfile.TemporaryDirectory() as root:
-                    software, modules, state, install, module, v0, v1, inode, builder = self._one(root)
-                    guards = guard_calls([install])
-                    originals = patch_os(guards)
-                    try:
-                        spec = _spec(
-                            software,
-                            modules,
-                            state,
-                            builder,
-                            "run1",
-                            ["demo/1"],
-                            faults=FaultInjector(step),
-                        )
-                        with self.assertRaises(InjectedCrash) as caught:
-                            run(spec)
-                        self.assertEqual(caught.exception.step, step)
-                        self._check(module, v0, v1, install, inode)
-                        journal = os.path.join(state, "runs", "run1", "journal.json")
-                        if os.path.isfile(journal):
-                            resumed = resume(
-                                state,
-                                "run1",
-                                builder=builder,
-                                faults=FaultInjector(),
-                            )
-                            self.assertEqual(resumed.returncode, 0, resumed.message)
-                            self._check(module, v0, v1, install, inode)
-                            text = open(module, encoding="utf-8").read()
-                            self.assertEqual(text, v1)
-                    finally:
-                        restore_os(originals)
-
-    def test_resume_can_crash_and_still_converges(self):
+    def test_success_uses_rename_exchange_when_probe_succeeds(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, v1, inode, builder = self._one(root)
-            spec = _spec(
+            software, modules, state, installed, builder = _fixture(root)
+            probes = json.loads(json.dumps(PROBES))
+            probes["rename_exchange"]["ok"] = True
+            result = run(_spec(software, modules, state, builder, probes=probes))
+            self.assertEqual(result.returncode, 0, result.message)
+            self.assert_new_live(installed)
+            journal = load_journal(journal_path(state, "run1"))
+            self.assertEqual(
+                journal["modules_plan"][0]["swap_method"],
+                "renameat2-exchange",
+            )
+
+    def test_every_recorded_failure_restores_old_tree_then_resumes(self):
+        with tempfile.TemporaryDirectory() as root:
+            software, modules, state, _installed, builder = _fixture(root)
+            recording = _spec(
                 software,
                 modules,
                 state,
                 builder,
-                "run1",
-                ["demo/1"],
-                faults=FaultInjector("publish.file:all/demo/1.lua.rename"),
+                run_id="record",
             )
-            with self.assertRaises(InjectedCrash):
-                run(spec)
-            self._check(module, v0, v1, install, inode)
-            with self.assertRaises(InjectedCrash):
-                resume(
-                    state,
-                    "run1",
-                    builder=builder,
-                    faults=FaultInjector("journal.complete.rename"),
-                )
-            self._check(module, v0, v1, install, inode)
-            resumed = resume(state, "run1", builder=builder, faults=FaultInjector())
-            self.assertEqual(resumed.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), v1)
-            self.assertEqual(os.lstat(install).st_ino, inode)
-
-    def test_two_modules_stay_complete_between_publishes(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state = _tree(root)
-            lib_install, lib_module, lib_v0 = classic_install(
-                software, modules, "lib/1", "lib-v0\n", "all/lib/1.lua", name="lib"
-            )
-            app_install, app_module, app_v0 = classic_install(
-                software, modules, "app/1", "app-v0\n", "all/app/1.lua", name="app", loads=("lib/1",)
-            )
-            lib_inode = os.lstat(lib_install).st_ino
-            app_inode = os.lstat(app_install).st_ino
-            packages = [
-                {
-                    "rel": "lib/1",
-                    "payload": "lib-v1\n",
-                    "module_rel": "all/lib/1.lua",
-                    "name": "lib",
-                },
-                {
-                    "rel": "app/1",
-                    "payload": "app-v1\n",
-                    "module_rel": "all/app/1.lua",
-                    "name": "app",
-                    "loads": ("lib/1",),
-                },
-            ]
-            builder = installpath_builder(packages)
-            record = _spec(software, modules, state, builder, "record", ["lib/1", "app/1"])
-            self.assertEqual(run(record).returncode, 0)
-            self.assertLess(
-                record.faults.reached.index("publish.file:all/lib/1.lua.rename"),
-                record.faults.reached.index("publish.file:all/app/1.lua.rename"),
-            )
-            steps = list(record.faults.reached)
-
-        lib_v1 = lua(generation_of("ignored", "run1", "lib/1"), name="lib")
-        # generation path depends on the temp root, so the exact v1 text is checked
-        # after resume by payload, and during the crash by "a complete payload".
-        del lib_v1
+            self.assertEqual(run(recording).returncode, 0)
+            steps = list(recording.faults.reached)
+            self.assertIn("swap:all/demo/1.lua.fallback.staged-to-live", steps)
+            self.assertIn("journal.swap:all/demo/1.lua.rename", steps)
+            self.assertIn("journal.complete.rename", steps)
 
         for step in steps:
             with self.subTest(step=step):
                 with tempfile.TemporaryDirectory() as root:
-                    software, modules, state = _tree(root)
-                    lib_install, lib_module, _lib_v0 = classic_install(
-                        software, modules, "lib/1", "lib-v0\n", "all/lib/1.lua", name="lib"
-                    )
-                    app_install, app_module, _app_v0 = classic_install(
-                        software,
-                        modules,
-                        "app/1",
-                        "app-v0\n",
-                        "all/app/1.lua",
-                        name="app",
-                        loads=("lib/1",),
-                    )
-                    lib_inode = os.lstat(lib_install).st_ino
-                    app_inode = os.lstat(app_install).st_ino
-                    builder = installpath_builder(packages)
+                    software, modules, state, installed, builder = _fixture(root)
                     spec = _spec(
                         software,
                         modules,
                         state,
                         builder,
-                        "run1",
-                        ["lib/1", "app/1"],
                         faults=FaultInjector(step),
                     )
                     with self.assertRaises(InjectedCrash):
                         run(spec)
-                    self.assertEqual(os.lstat(lib_install).st_ino, lib_inode)
-                    self.assertEqual(os.lstat(app_install).st_ino, app_inode)
-                    for module, install, old, new in (
-                        (lib_module, lib_install, "lib-v0\n", "lib-v1\n"),
-                        (app_module, app_install, "app-v0\n", "app-v1\n"),
-                    ):
-                        self.assertEqual(lstat_kind(module), "file")
-                        text = open(module, encoding="utf-8").read()
-                        _syntax, resolved = parse_root(text)
-                        self.assertEqual(lstat_kind(resolved), "dir")
-                        payload = open(os.path.join(resolved, "PAYLOAD"), encoding="utf-8").read()
-                        self.assertIn(payload, {old, new})
-                        if payload == old:
-                            self.assertEqual(abspath(resolved), abspath(install))
-                    resumed = None
-                    journal = os.path.join(state, "runs", "run1", "journal.json")
-                    if os.path.isfile(journal):
-                        resumed = resume(state, "run1", builder=builder, faults=FaultInjector())
-                        self.assertEqual(resumed.returncode, 0, resumed.message)
-                        for module, new in ((lib_module, "lib-v1\n"), (app_module, "app-v1\n")):
-                            _syntax, resolved = parse_root(open(module, encoding="utf-8").read())
-                            self.assertEqual(
-                                open(os.path.join(resolved, "PAYLOAD"), encoding="utf-8").read(),
-                                new,
-                            )
-
-    def test_new_module_is_absent_or_complete(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state = _tree(root)
-            builder = installpath_builder(
-                [{"rel": "demo/1", "payload": "v1\n", "module_rel": "all/demo/1.lua"}]
-            )
-            record = _spec(software, modules, state, builder, "record", ["demo/1"])
-            self.assertEqual(run(record).returncode, 0)
-            steps = list(record.faults.reached)
-            module = os.path.join(modules, "all/demo/1.lua")
-            self.assertFalse(os.path.exists(os.path.join(software, "demo/1")))
-
-        for step in steps:
-            with self.subTest(step=step):
-                with tempfile.TemporaryDirectory() as root:
-                    software, modules, state = _tree(root)
-                    module = os.path.join(modules, "all/demo/1.lua")
-                    builder = installpath_builder(
-                        [{"rel": "demo/1", "payload": "v1\n", "module_rel": "all/demo/1.lua"}]
-                    )
-                    spec = _spec(
-                        software,
-                        modules,
-                        state,
-                        builder,
-                        "run1",
-                        ["demo/1"],
-                        faults=FaultInjector(step),
-                    )
-                    with self.assertRaises(InjectedCrash):
-                        run(spec)
-                    self.assertFalse(os.path.exists(os.path.join(software, "demo/1")))
-                    if os.path.lexists(module):
-                        self.assertEqual(lstat_kind(module), "file")
-                        text = open(module, encoding="utf-8").read()
-                        _syntax, resolved = parse_root(text)
-                        self.assertEqual(
-                            open(os.path.join(resolved, "PAYLOAD"), encoding="utf-8").read(),
-                            "v1\n",
+                    self.assert_old_live(installed)
+                    path = journal_path(state, "run1")
+                    if os.path.isfile(path):
+                        result = resume(
+                            state,
+                            "run1",
+                            builder=builder,
+                            faults=FaultInjector(),
                         )
-                        self.assertEqual(lstat_kind(resolved), "dir")
+                        self.assertEqual(result.returncode, 0, result.message)
+                        self.assert_new_live(installed)
 
-    def test_rollback_restores_previous_module_and_keeps_generation(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, v1, inode, builder = self._one(root)
-            spec = _spec(software, modules, state, builder, "run1", ["demo/1"])
-            self.assertEqual(run(spec).returncode, 0)
-            generation = generation_of(state, "run1", "demo/1")
-            self.assertTrue(os.path.isdir(generation))
-            result = rollback(state, "run1")
-            self.assertEqual(result.returncode, 0, result.message)
-            self.assertEqual(open(module, encoding="utf-8").read(), v0)
-            self.assertEqual(os.lstat(install).st_ino, inode)
-            self.assertTrue(os.path.isdir(generation))
-            self.assertEqual(open(os.path.join(generation, "PAYLOAD"), encoding="utf-8").read(), "v1\n")
-            again = rollback(state, "run1")
-            self.assertEqual(again.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), v0)
+    def test_failure_on_second_module_restores_both_modules(self):
+        failures = (
+            "swap:all/app/1.lua.fallback.staged-to-live",
+            "journal.swap:all/app/1.lua.rename",
+            "journal.module:all/app/1.lua.rename",
+        )
+        for step in failures:
+            with self.subTest(step=step):
+                with tempfile.TemporaryDirectory() as root:
+                    software, modules, state, installed, builder = _fixture(root, two=True)
+                    with self.assertRaises(InjectedCrash):
+                        run(
+                            _spec(
+                                software,
+                                modules,
+                                state,
+                                builder,
+                                faults=FaultInjector(step),
+                            )
+                        )
+                    self.assert_old_live(installed)
 
-    def test_rollback_fault_then_resume(self):
+    def test_failed_build_never_touches_live_tree(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, v1, inode, builder = self._one(root)
-            self.assertEqual(run(_spec(software, modules, state, builder, "run1", ["demo/1"])).returncode, 0)
-            with self.assertRaises(InjectedCrash):
-                rollback(state, "run1", faults=FaultInjector("rollback.file:all/demo/1.lua.rename"))
-            self._check(module, v0, v1, install, inode)
-            result = rollback(state, "run1", faults=FaultInjector())
+            software, modules, state, installed, _builder = _fixture(root)
+
+            def fail(_context):
+                return 7
+
+            result = run(_spec(software, modules, state, fail))
+            self.assertEqual(result.returncode, 7)
+            self.assert_old_live(installed)
+
+    def test_dry_run_creates_no_state_and_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            software, modules, state, installed, builder = _fixture(root)
+            spec = _spec(software, modules, state, builder)
+            spec.dry_run = True
+            result = run(spec)
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), v0)
+            self.assertFalse(os.path.isdir(os.path.join(state, "runs")))
+            self.assert_old_live(installed)
+            self.assertIn("installpath-software", result.command)
 
-    def test_symlink_install_dir_is_refused_before_build(self):
+    def test_missing_rebuild_target_is_refused_before_build(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state = _tree(root)
-            real = os.path.join(root, "real")
-            os.makedirs(real)
-            with open(os.path.join(real, "PAYLOAD"), "w", encoding="utf-8") as handle:
-                handle.write("kept\n")
-            os.makedirs(os.path.join(software, "demo"))
-            os.symlink(real, os.path.join(software, "demo", "1"))
+            software = os.path.join(root, "software")
+            modules = os.path.join(root, "modules")
+            state = os.path.join(root, "state")
+            os.makedirs(software)
+            os.makedirs(modules)
             called = []
 
-            def builder(_ctx):
+            def builder(_context):
                 called.append(True)
                 return 0
 
-            spec = _spec(software, modules, state, builder, "run1", ["demo/1"])
+            with self.assertRaises(Refused):
+                run(_spec(software, modules, state, builder))
+            self.assertEqual(called, [])
+
+    def test_symlink_rebuild_target_is_refused_before_build(self):
+        with tempfile.TemporaryDirectory() as root:
+            software, modules, state, installed, builder = _fixture(root)
+            row = installed["demo/1"]
+            moved = row["install"] + ".real"
+            os.rename(row["install"], moved)
+            os.symlink(moved, row["install"])
+            with self.assertRaises(Refused):
+                run(_spec(software, modules, state, builder))
+            self.assertEqual(_payload(moved), row["old"])
+
+    def test_module_path_cannot_escape_software_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            software, modules, state, _installed, builder = _fixture(root)
+            spec = _spec(software, modules, state, builder)
+            spec.module_rels = ["../outside/1"]
             with self.assertRaises(Refused) as caught:
                 run(spec)
-            self.assertIn("symlink", str(caught.exception))
-            self.assertEqual(called, [])
-            self.assertEqual(open(os.path.join(real, "PAYLOAD"), encoding="utf-8").read(), "kept\n")
+            self.assertIn("escapes", str(caught.exception))
 
-    def test_symlink_module_file_is_not_replaced(self):
+    def test_symlinked_state_root_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, _v1, _inode, builder = self._one(root)
-            target = module + ".target"
-            os.rename(module, target)
-            os.symlink(target, module)
-            before = os.readlink(module)
-            spec = _spec(software, modules, state, builder, "run1", ["demo/1"])
-            result = run(spec)
-            self.assertEqual(result.returncode, 2)
-            self.assertTrue(os.path.islink(module))
-            self.assertEqual(os.readlink(module), before)
-            self.assertEqual(open(target, encoding="utf-8").read(), v0)
-            self.assertEqual(open(os.path.join(install, "PAYLOAD"), encoding="utf-8").read(), "v0\n")
+            software, modules, _state, installed, builder = _fixture(root)
+            real_state = os.path.join(root, "real-state")
+            os.makedirs(real_state)
+            state = os.path.join(root, "state-link")
+            os.symlink(real_state, state)
+            with self.assertRaises(Refused) as caught:
+                run(_spec(software, modules, state, builder))
+            self.assertIn("state root", str(caught.exception))
+            self.assert_old_live(installed)
 
-    def test_preserves_module_file_mode(self):
+
+class RollbackTests(unittest.TestCase):
+    def test_rollback_restores_exact_old_directory(self):
         with tempfile.TemporaryDirectory() as root:
-            software, modules, state, _install, module, _v0, v1, _inode, builder = self._one(root)
-            os.chmod(module, 0o640)
-            spec = _spec(software, modules, state, builder, "run1", ["demo/1"])
-            self.assertEqual(run(spec).returncode, 0)
-            self.assertEqual(os.stat(module).st_mode & 0o777, 0o640)
-            self.assertEqual(open(module, encoding="utf-8").read(), v1)
-
-    def test_gc_removes_only_a_retired_generation(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, _v1, inode, builder = self._one(root)
-            clock = Clock()
-            first = _spec(software, modules, state, builder, "run1", ["demo/1"], clock=clock)
-            self.assertEqual(run(first).returncode, 0)
-            second_builder = installpath_builder(
-                [
-                    {
-                        "rel": "demo/1",
-                        "payload": "v2\n",
-                        "module_rel": "all/demo/1.lua",
-                    }
-                ]
-            )
-            second = _spec(software, modules, state, second_builder, "run2", ["demo/1"], clock=clock)
-            self.assertEqual(run(second).returncode, 0)
-            self.assertEqual(
-                open(os.path.join(parse_root(open(module, encoding="utf-8").read())[1], "PAYLOAD"), encoding="utf-8").read(),
-                "v2\n",
-            )
-            grace = 144
-            # Still inside the grace window measured from the second publish.
-            early = collect(state, grace, clock.now + 10, dry_run=True)
-            self.assertTrue(all(item["action"] == "keep" for item in early))
-            self.assertTrue(os.path.isdir(generation_of(state, "run1", "demo/1")))
-            later = collect(state, grace, clock.now + grace * 3600 + 5, dry_run=False)
-            removed = [item["path"] for item in later if item["action"] == "remove"]
-            self.assertTrue(any(item.endswith(os.path.join("generations", "run1")) for item in removed))
-            self.assertFalse(os.path.isdir(os.path.join(state, "generations", "run1")))
-            self.assertTrue(os.path.isdir(os.path.join(state, "generations", "run2")))
-            self.assertEqual(os.lstat(install).st_ino, inode)
-            self.assertEqual(open(os.path.join(install, "PAYLOAD"), encoding="utf-8").read(), "v0\n")
-            self.assertTrue(os.path.isfile(module))
-
-    def test_failed_build_does_not_publish(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, module, v0, _v1, inode, _builder = self._one(root)
-
-            def fail(_ctx):
-                return 7
-
-            spec = _spec(software, modules, state, fail, "run1", ["demo/1"])
-            result = run(spec)
-            self.assertEqual(result.returncode, 7)
-            self.assertEqual(open(module, encoding="utf-8").read(), v0)
-            self.assertEqual(os.lstat(install).st_ino, inode)
-
-    def test_resume_clears_staged_module_files_before_rebuilding(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state, install, _module, _v0, _v1, _inode, _builder = self._one(root)
-            seen = []
-
-            def builder(ctx):
-                staged = os.path.join(ctx.generation_root, "modules", "all", "demo", "1.lua")
-                seen.append(os.path.isfile(staged))
-                os.makedirs(os.path.dirname(staged), exist_ok=True)
-                with open(staged, "w", encoding="utf-8") as handle:
-                    handle.write(f'local root = "{install}"\n')
-                generation = os.path.join(ctx.generation_root, "software", "demo", "1", "easybuild")
-                os.makedirs(generation, exist_ok=True)
-                with open(os.path.join(generation, "demo-1.eb"), "w", encoding="utf-8") as handle:
-                    handle.write("name = 'demo'\n")
-                with open(os.path.join(ctx.generation_root, "software", "demo", "1", "PAYLOAD"), "w", encoding="utf-8") as handle:
-                    handle.write("v1\n")
-                return 0
-
-            spec = _spec(
-                software,
-                modules,
-                state,
-                builder,
-                "run1",
-                ["demo/1"],
-                faults=FaultInjector("build.finish"),
-            )
-            with self.assertRaises(InjectedCrash):
-                run(spec)
-            with self.assertRaises(InjectedCrash):
-                resume(state, "run1", builder=builder, faults=FaultInjector("build.finish"))
-            self.assertEqual(seen, [False, False])
-            self.assertTrue(os.path.isdir(install))
-
-    def test_dry_run_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as root:
-            software, modules, state, _install, module, v0, _v1, _inode, builder = self._one(root)
-            spec = _spec(software, modules, state, builder, "run1", ["demo/1"])
-            spec.dry_run = True
-            result = run(spec)
+            software, modules, state, installed, builder = _fixture(root)
+            self.assertEqual(run(_spec(software, modules, state, builder)).returncode, 0)
+            result = rollback(state, "run1")
             self.assertEqual(result.returncode, 0, result.message)
-            self.assertFalse(os.path.isdir(os.path.join(state, "runs")))
-            self.assertEqual(open(module, encoding="utf-8").read(), v0)
-            self.assertIn("--installpath-software=", result.command)
-            self.assertNotIn("--remove-ghost-install-dirs", result.command)
+            TransactionTests().assert_old_live(installed)
+            journal = load_journal(journal_path(state, "run1"))
+            self.assertEqual(_payload(journal["modules_plan"][0]["retired"]), "v1\n")
+            self.assertEqual(rollback(state, "run1").returncode, 0)
 
-
-class RejectedTwoRenameTest(unittest.TestCase):
-    def test_failed_second_rename_leaves_the_live_path_missing(self):
-        """The directory-exchange fallback can drop the live name. This tool does not do it."""
+    def test_every_rollback_failure_restores_published_tree(self):
         with tempfile.TemporaryDirectory() as root:
-            live = os.path.join(root, "demo")
-            new = os.path.join(root, ".demo.new")
-            os.makedirs(live)
-            os.makedirs(new)
-            open(os.path.join(live, "PAYLOAD"), "w", encoding="utf-8").write("old\n")
-            open(os.path.join(new, "PAYLOAD"), "w", encoding="utf-8").write("new\n")
-            held = new + ".old"
-            os.rename(live, held)
-            self.assertFalse(os.path.exists(live))
-            # The second rename is where a crash or an EXDEV leaves the name missing.
-            self.assertTrue(os.path.isdir(held))
-            self.assertFalse(os.path.exists(live))
+            software, modules, state, _installed, builder = _fixture(root)
+            self.assertEqual(run(_spec(software, modules, state, builder)).returncode, 0)
+            recorder = FaultInjector()
+            self.assertEqual(rollback(state, "run1", faults=recorder).returncode, 0)
+            steps = list(recorder.reached)
+            self.assertIn(
+                "rollback.swap:all/demo/1.lua.fallback.staged-to-live",
+                steps,
+            )
+            self.assertIn("journal.rolled_back.rename", steps)
+
+        for step in steps:
+            with self.subTest(step=step):
+                with tempfile.TemporaryDirectory() as root:
+                    software, modules, state, installed, builder = _fixture(root)
+                    self.assertEqual(run(_spec(software, modules, state, builder)).returncode, 0)
+                    with self.assertRaises(InjectedCrash):
+                        rollback(state, "run1", faults=FaultInjector(step))
+                    TransactionTests().assert_new_live(installed)
+                    self.assertEqual(rollback(state, "run1").returncode, 0)
+                    TransactionTests().assert_old_live(installed)
+
+
+class GarbageCollectionTests(unittest.TestCase):
+    def test_gc_removes_only_the_hidden_retired_tree_after_grace(self):
+        with tempfile.TemporaryDirectory() as root:
+            software, modules, state, installed, builder = _fixture(root)
+            clock = Clock()
+            self.assertEqual(
+                run(_spec(software, modules, state, builder, clock=clock)).returncode,
+                0,
+            )
+            journal = load_journal(journal_path(state, "run1"))
+            retired = journal["modules_plan"][0]["retired"]
+            grace_hours = 144
+            early = collect(state, grace_hours, clock.now, dry_run=True)
+            self.assertEqual(early[0]["action"], "keep")
+            later = collect(
+                state,
+                grace_hours,
+                clock.now + grace_hours * 3600 + 1,
+                dry_run=False,
+            )
+            self.assertEqual(later[0]["action"], "remove")
+            self.assertFalse(os.path.exists(retired))
+            TransactionTests().assert_new_live(installed)
 
 
 if __name__ == "__main__":

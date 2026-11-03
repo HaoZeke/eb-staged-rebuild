@@ -10,6 +10,16 @@ from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.probe import probe_all, probe_rename_exchange
 
 
+def _write(path, text):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 class ProbeTests(unittest.TestCase):
     def test_rename_exchange_reports_a_result_for_this_directory(self):
         with tempfile.TemporaryDirectory() as root:
@@ -47,16 +57,18 @@ class CliTests(unittest.TestCase):
             software = os.path.join(root, "software")
             modules = os.path.join(root, "modules")
             os.makedirs(os.path.join(software, "demo", "1", "easybuild"))
-            open(os.path.join(software, "demo", "1", "PAYLOAD"), "w", encoding="utf-8").write("v0\n")
-            open(os.path.join(software, "demo", "1", "easybuild", "demo-1.eb"), "w", encoding="utf-8").write(
-                "name = 'demo'\n"
+            _write(os.path.join(software, "demo", "1", "PAYLOAD"), "v0\n")
+            _write(
+                os.path.join(software, "demo", "1", "easybuild", "demo-1.eb"),
+                "name = 'demo'\n",
             )
             module = os.path.join(modules, "all", "demo")
             os.makedirs(module)
             module_file = os.path.join(module, "1.lua")
             install = os.path.join(software, "demo", "1")
-            open(module_file, "w", encoding="utf-8").write(
-                f'local root = "{install}"\nsetenv("EBROOTDEMO", root)\n'
+            _write(
+                module_file,
+                f'local root = "{install}"\nsetenv("EBROOTDEMO", root)\n',
             )
             env = dict(os.environ)
             cmd = [
@@ -84,7 +96,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
             self.assertIn("dry-run", completed.stdout)
             self.assertFalse(os.path.isdir(os.path.join(root, "state", "runs")))
-            self.assertIn("v0\n", open(os.path.join(install, "PAYLOAD"), encoding="utf-8").read())
+            self.assertIn("v0\n", _read(os.path.join(install, "PAYLOAD")))
 
             probe = subprocess.run(
                 [sys.executable, "-m", "eb_staged_rebuild", "probe", "--path", root, "--json", "--eb", "missing-eb"],

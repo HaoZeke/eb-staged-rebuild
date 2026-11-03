@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eb-staged-rebuild"
-version = "0.1.0"
-description = "Rebuild an EasyBuild install into a new generation and publish it by replacing the module file."
+version = "0.2.0"
+description = "Stage an EasyBuild rebuild and atomically exchange it with the live directory."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}

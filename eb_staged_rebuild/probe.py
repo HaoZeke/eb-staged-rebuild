@@ -9,9 +9,8 @@ import subprocess
 import sys
 import tempfile
 
-# Linux UAPI include/uapi/linux/fs.h and include/uapi/linux/fcntl.h.
-RENAME_EXCHANGE = 1 << 1
-AT_FDCWD = -100
+from eb_staged_rebuild.swap import AT_FDCWD, RENAME_EXCHANGE
+
 VERSION_PROBE_TIMEOUT_SECONDS = 30
 CAPABILITY_PROBE_TIMEOUT_SECONDS = 60
 USER_NAMESPACE_FLAGS = (

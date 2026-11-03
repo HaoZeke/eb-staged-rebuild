@@ -1,17 +1,13 @@
-"""Publish a finished generation by replacing module files, never the software directory.
+"""Build complete staged installs and transactionally swap them into place."""
 
-A crash between steps leaves every live module file either absent (when it did
-not exist before this run) or equal to a complete generation's module text.
-The software directory at ``<software>/<name>/<version>`` is not renamed.
-"""
-
+import errno
 import json
 import os
 import shutil
 import time
 from dataclasses import dataclass, field
 
-from eb_staged_rebuild.atomicio import atomic_write, read_bytes, sha256_bytes
+from eb_staged_rebuild.atomicio import atomic_write, fsync_dir, read_bytes, sha256_bytes
 from eb_staged_rebuild.builders import (
     bwrap_command,
     dry_run_command,
@@ -22,11 +18,12 @@ from eb_staged_rebuild.builders import (
     userns_command,
 )
 from eb_staged_rebuild.discover import (
-    generation_for,
     map_link_target,
     order_module_files,
+    swap_install_for,
     walk_module_tree,
 )
+from eb_staged_rebuild.constants import DEFAULT_GRACE_HOURS, RUN_ID_TIMESTAMP_FORMAT
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 from eb_staged_rebuild.faults import FaultInjector
 from eb_staged_rebuild.journal import (
@@ -43,9 +40,11 @@ from eb_staged_rebuild.paths import (
     abspath,
     assert_real_components,
     is_real_dir,
+    is_within,
     lstat_kind,
 )
 from eb_staged_rebuild.probe import probe_all, stage_paths_from_bwrap_info
+from eb_staged_rebuild.swap import recover_interrupted_swap, swap_directories
 
 import re
 
@@ -59,7 +58,7 @@ class Spec:
     state_root: str
     eb_args: list
     backend: str = "auto"
-    grace_hours: float = 144.0
+    grace_hours: float = DEFAULT_GRACE_HOURS
     dry_run: bool = False
     module_rels: list = field(default_factory=list)
     eb_executable: str = "eb"
@@ -119,12 +118,17 @@ def _check_roots(spec):
         if kind == "symlink":
             raise Refused(f"modules path is a symlink: {spec.modules}")
         raise Refused(f"modules path is not a real directory: {spec.modules} ({kind})")
+    reason = assert_real_components(spec.state_root)
+    if reason:
+        raise Refused(f"state root is unsafe: {reason}")
     if spec.backend not in ("auto", "installpath", "bwrap", "userns"):
         raise Refused(f"unknown backend {spec.backend}")
 
 
 def _check_install_dir(software, rel):
-    path = os.path.join(software, rel)
+    path = abspath(os.path.join(software, rel))
+    if path == abspath(software) or not is_within(path, software):
+        raise Refused(f"module path escapes the software root: {rel}")
     if lstat_kind(path) == "symlink":
         raise Refused(
             f"{path} is a symlink. Name/version must stay a real directory: "
@@ -135,8 +139,8 @@ def _check_install_dir(software, rel):
     if reason:
         raise Refused(f"{rel}: {reason}. Name/version must stay a real directory")
     kind = lstat_kind(path)
-    if kind not in ("missing", "dir"):
-        raise Refused(f"{path} is a {kind}, not a directory")
+    if kind != "dir":
+        raise Refused(f"{path} is a {kind}, not an existing rebuild directory")
 
 
 def software_rels_from_dry_run(text):
@@ -188,7 +192,7 @@ def _learn_rels(spec, faults, log):
 def _new_run_id(spec):
     if spec.run_id:
         return spec.run_id
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(_clock(spec)()))
+    stamp = time.strftime(RUN_ID_TIMESTAMP_FORMAT, time.gmtime(_clock(spec)()))
     base = f"{stamp}-{os.getpid()}"
     candidate = base
     suffix = 0
@@ -253,6 +257,9 @@ def _stage_roots(spec, journal, generation_root):
     info = _read_bwrap_info(generation_root)
     version = (journal.get("probes") or {}).get("easybuild", {}).get("framework_version")
     software, modules, how = stage_paths_from_bwrap_info(info, version, generation_root)
+    for label, path in (("software", software), ("modules", modules)):
+        if not is_within(path, generation_root):
+            raise Refused(f"bwrap stage {label} path escapes this run: {path}")
     return software, modules, how
 
 
@@ -270,44 +277,58 @@ def _plan(spec, journal, faults):
     drafted = []
     for path in ordered:
         rel = os.path.relpath(path, stage_modules).replace(os.sep, "/")
-        generation, new_text = generation_for(texts[path], stage_software, spec.software)
-        if not generation_complete(generation):
-            raise Refused(f"{generation} is not a complete generation")
-        if os.path.islink(generation):
-            raise Refused(f"generation {generation} is a symlink")
-        live_software = os.path.join(
-            spec.software, os.path.relpath(generation, abspath(stage_software))
+        staged, live_software, new_text = swap_install_for(
+            texts[path],
+            stage_software,
+            spec.software,
         )
+        if not generation_complete(staged):
+            raise Refused(f"{staged} is not a complete staged installation")
+        if os.path.islink(staged):
+            raise Refused(f"staged installation {staged} is a symlink")
         if lstat_kind(live_software) == "symlink":
             raise Refused(
                 f"{live_software} is a symlink. Name/version must stay a real directory"
             )
+        if lstat_kind(live_software) != "dir":
+            raise Refused(
+                f"staged rebuild target must already be a real directory: {live_software}"
+            )
+        retired = os.path.join(
+            os.path.dirname(live_software),
+            f".{os.path.basename(live_software)}.{journal['run_id']}",
+        )
+        if lstat_kind(retired) != "missing":
+            raise Refused(f"retired path already exists: {retired}")
         live_module = os.path.join(spec.modules, rel)
+        if not is_within(live_module, spec.modules):
+            raise Refused(f"module path escapes the module root: {rel}")
         if lstat_kind(live_module) == "symlink":
             raise Refused(
                 f"refusing to replace module symlink {live_module}. "
                 "The module file that is the pointer must be a regular file"
             )
         reason = assert_real_components(live_module)
-        if reason and lstat_kind(live_module) != "missing":
+        if reason:
             raise Refused(reason)
         if lstat_kind(live_module) not in ("missing", "file"):
             raise Refused(f"{live_module} is not a regular file")
-        drafted.append((rel, generation, new_text, live_module))
+        drafted.append((rel, staged, live_software, retired, new_text, live_module))
 
     run_dir = run_dir_for(spec.state_root, journal["run_id"])
     plan = []
-    for rel, generation, new_text, live_module in drafted:
+    for rel, staged, live_software, retired, new_text, live_module in drafted:
         prepared = os.path.join(run_dir, "prepared", rel)
         atomic_write(prepared, new_text, faults, f"prepare:{rel}")
         stamp = {
             "run_id": journal["run_id"],
-            "generation": generation,
+            "staged": staged,
+            "live": live_software,
             "module": rel,
             "sha256": sha256_bytes(new_text.encode("utf-8")),
         }
         atomic_write(
-            os.path.join(generation, ".eb-staged-rebuild-complete"),
+            os.path.join(staged, ".eb-staged-rebuild-complete"),
             json.dumps(stamp, indent=2, sort_keys=True) + "\n",
             faults,
             f"stamp:{rel}",
@@ -319,18 +340,26 @@ def _plan(spec, journal, faults):
             old_bytes = read_bytes(live_module)
             old_hash = sha256_bytes(old_bytes)
             _kind, previous_root = parse_root(old_bytes.decode("utf-8"))
+            if previous_root and abspath(previous_root) != abspath(live_software):
+                raise Refused(
+                    f"live module {live_module} points at {previous_root}, "
+                    f"not its stable install path {live_software}"
+                )
         plan.append(
             {
                 "rel": rel,
                 "live_module": live_module,
                 "prepared": prepared,
-                "generation": generation,
+                "staged": staged,
+                "live_software": live_software,
+                "retired": retired,
                 "backup": os.path.join(run_dir, "backups", rel),
                 "new_hash": sha256_bytes(new_text.encode("utf-8")),
                 "old_hash": old_hash,
                 "previous_root": previous_root,
                 "existed": existed,
                 "status": "pending",
+                "swap_method": None,
                 "published_at": None,
             }
         )
@@ -349,40 +378,119 @@ def _plan(spec, journal, faults):
     journal["links_plan"] = link_plan
 
 
-def _publish_one(mod, faults, clock):
+def _tree_run_id(path):
+    stamp = os.path.join(path, ".eb-staged-rebuild-complete")
+    if lstat_kind(stamp) != "file":
+        return None
+    try:
+        value = json.loads(read_bytes(stamp).decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value.get("run_id") if isinstance(value, dict) else None
+
+
+def _allow_exchange(journal):
+    return bool((journal.get("probes") or {}).get("rename_exchange", {}).get("ok"))
+
+
+def _prepare_module_backup(mod, faults):
     live = mod["live_module"]
-    prepared = read_bytes(mod["prepared"])
-    if sha256_bytes(prepared) != mod["new_hash"]:
-        raise NeedsIntervention(f"prepared module bytes for {mod['rel']} changed")
-    if not generation_complete(mod["generation"]):
-        raise Refused(f"refusing to publish an incomplete generation {mod['generation']}")
     kind = lstat_kind(live)
     if kind == "symlink":
         raise Refused(f"refusing to replace module symlink {live}")
-    if kind == "file":
+    if mod["existed"]:
+        if kind != "file":
+            raise NeedsIntervention(f"{live} disappeared before publish")
         current = read_bytes(live)
         current_hash = sha256_bytes(current)
-        if current_hash == mod["new_hash"]:
-            mod["status"] = "published"
-            mod["published_at"] = mod["published_at"] or clock()
-            return
-        if mod["old_hash"] is None or current_hash != mod["old_hash"]:
-            raise NeedsIntervention(
-                f"{live} is neither the previous module file nor the one this run prepared"
-            )
         backup = mod["backup"]
+        if current_hash == mod["new_hash"] and lstat_kind(backup) == "file":
+            if sha256_bytes(read_bytes(backup)) != mod["old_hash"]:
+                raise NeedsIntervention(
+                    f"backup for {mod['rel']} does not match the previous module file"
+                )
+            return
+        if current_hash != mod["old_hash"]:
+            raise NeedsIntervention(f"{live} changed after the build")
         if lstat_kind(backup) == "missing":
             atomic_write(backup, current, faults, f"publish.backup:{mod['rel']}")
         elif lstat_kind(backup) != "file" or sha256_bytes(read_bytes(backup)) != mod["old_hash"]:
-            raise NeedsIntervention(f"backup for {mod['rel']} does not match the previous module file")
-    elif kind == "missing":
-        if mod["existed"]:
-            raise NeedsIntervention(f"{live} disappeared before it could be published")
+            raise NeedsIntervention(
+                f"backup for {mod['rel']} does not match the previous module file"
+            )
+    elif kind == "file" and sha256_bytes(read_bytes(live)) == mod["new_hash"]:
+        return
+    elif kind != "missing":
+        raise NeedsIntervention(f"new module path appeared before publish: {live}")
+
+
+def _prepare_swap_source(mod, run_id, faults):
+    staged = mod["staged"]
+    retired = mod["retired"]
+    staged_kind = lstat_kind(staged)
+    retired_kind = lstat_kind(retired)
+    if staged_kind == "dir" and retired_kind == "missing":
+        faults.reach(f"stage.move:{mod['rel']}")
+        try:
+            os.rename(staged, retired)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise Refused(
+                    "the stage and live software tree are on different filesystems; "
+                    "place --state-root beside the software tree"
+                ) from error
+            raise
+        fsync_dir(os.path.dirname(retired))
+    elif staged_kind == "missing" and retired_kind == "dir":
+        pass
     else:
-        raise Refused(f"{live} is not a regular file")
+        raise NeedsIntervention(
+            f"cannot prepare {mod['rel']}: staged={staged_kind}, retired={retired_kind}"
+        )
+    if _tree_run_id(retired) != run_id:
+        raise NeedsIntervention(f"prepared tree does not belong to run {run_id}: {retired}")
+
+
+def _write_new_module(mod, faults):
+    prepared = read_bytes(mod["prepared"])
+    if sha256_bytes(prepared) != mod["new_hash"]:
+        raise NeedsIntervention(f"prepared module bytes for {mod['rel']} changed")
+    live = mod["live_module"]
+    kind = lstat_kind(live)
+    if kind == "file" and sha256_bytes(read_bytes(live)) == mod["new_hash"]:
+        return
+    if mod["existed"]:
+        if kind != "file" or sha256_bytes(read_bytes(live)) != mod["old_hash"]:
+            raise NeedsIntervention(f"{live} is not the previous module file")
+    elif kind != "missing":
+        raise NeedsIntervention(f"{live} appeared before it could be published")
     atomic_write(live, prepared, faults, f"publish.file:{mod['rel']}")
-    mod["status"] = "published"
-    mod["published_at"] = clock()
+
+
+def _restore_old_module(mod, faults):
+    live = mod["live_module"]
+    kind = lstat_kind(live)
+    if mod["existed"]:
+        backup = mod["backup"]
+        if lstat_kind(backup) != "file":
+            raise NeedsIntervention(f"no backup to restore for {mod['rel']}")
+        previous = read_bytes(backup)
+        if sha256_bytes(previous) != mod["old_hash"]:
+            raise NeedsIntervention(f"backup for {mod['rel']} changed")
+        if kind == "file" and sha256_bytes(read_bytes(live)) == mod["old_hash"]:
+            return
+        if kind != "file" or sha256_bytes(read_bytes(live)) != mod["new_hash"]:
+            raise NeedsIntervention(f"{live} is neither the old nor new module file")
+        atomic_write(live, previous, faults, f"restore.file:{mod['rel']}")
+        return
+    if kind == "missing":
+        return
+    if kind == "file" and sha256_bytes(read_bytes(live)) == mod["new_hash"]:
+        faults.reach(f"restore.remove:{mod['rel']}")
+        os.remove(live)
+        fsync_dir(os.path.dirname(live))
+        return
+    raise NeedsIntervention(f"{live} is not the module file this run created")
 
 
 def _create_links(journal, faults):
@@ -407,26 +515,123 @@ def _create_links(journal, faults):
         link["status"] = "created"
 
 
+def _remove_created_links(journal):
+    for link in reversed(journal.get("links_plan") or []):
+        if not link.get("created"):
+            continue
+        path = link["live_path"]
+        if lstat_kind(path) == "symlink" and os.readlink(path) == link["target"]:
+            os.unlink(path)
+            fsync_dir(os.path.dirname(path))
+        link["created"] = False
+        link["status"] = "pending"
+
+
+def _normalize_publish_baseline(journal):
+    """Recover interrupted swaps and return every module to the old live tree."""
+    silent = FaultInjector()
+    for mod in reversed(journal.get("modules_plan") or []):
+        live = mod["live_software"]
+        retired = mod["retired"]
+        recover_interrupted_swap(live, retired)
+        live_run = _tree_run_id(live)
+        retired_run = _tree_run_id(retired)
+        if live_run == journal["run_id"] and retired_run != journal["run_id"]:
+            swap_directories(
+                live,
+                retired,
+                allow_exchange=_allow_exchange(journal),
+                faults=silent,
+                step_prefix=f"recover:{mod['rel']}",
+            )
+        elif live_run != journal["run_id"] and retired_run == journal["run_id"]:
+            pass
+        else:
+            raise NeedsIntervention(
+                f"cannot identify old and staged trees for {mod['rel']}: "
+                f"live run={live_run!r}, retired run={retired_run!r}"
+            )
+        _restore_old_module(mod, silent)
+        mod["status"] = "pending"
+        mod["swap_method"] = None
+        mod["published_at"] = None
+    _remove_created_links(journal)
+
+
+def _restore_publish_baseline(journal):
+    try:
+        _remove_created_links(journal)
+        _normalize_publish_baseline(journal)
+    except BaseException as error:
+        raise NeedsIntervention(
+            f"publish failed and the old live tree could not be restored: {error}"
+        ) from error
+
+
 def _publish(spec, journal, faults):
     journal["state"] = "publishing"
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.publishing")
     clock = _clock(spec)
     for mod in journal["modules_plan"]:
-        if mod["status"] == "published":
-            continue
-        _publish_one(mod, faults, clock)
-        _log(f"published {mod['rel']} -> {mod['generation']}")
+        _prepare_module_backup(mod, faults)
+        _prepare_swap_source(mod, journal["run_id"], faults)
+    save_journal(
+        journal_path(spec.state_root, journal["run_id"]),
+        journal,
+        faults,
+        "journal.prepared",
+    )
+    try:
+        _normalize_publish_baseline(journal)
+        for mod in journal["modules_plan"]:
+            result = swap_directories(
+                mod["live_software"],
+                mod["retired"],
+                allow_exchange=_allow_exchange(journal),
+                faults=faults,
+                step_prefix=f"swap:{mod['rel']}",
+            )
+            mod["status"] = "swapped"
+            mod["swap_method"] = result.method
+            mod["published_at"] = clock()
+            _log(f"swapped {mod['rel']} ({result.method})")
+            save_journal(
+                journal_path(spec.state_root, journal["run_id"]),
+                journal,
+                faults,
+                f"journal.swap:{mod['rel']}",
+            )
+        for mod in journal["modules_plan"]:
+            _write_new_module(mod, faults)
+            mod["status"] = "published"
+            _log(f"published module {mod['rel']}")
+            save_journal(
+                journal_path(spec.state_root, journal["run_id"]),
+                journal,
+                faults,
+                f"journal.module:{mod['rel']}",
+            )
+        _create_links(journal, faults)
+        journal["state"] = "complete"
+        journal["completed_at"] = clock()
+        journal["message"] = "published"
         save_journal(
             journal_path(spec.state_root, journal["run_id"]),
             journal,
             faults,
-            f"journal.module:{mod['rel']}",
+            "journal.complete",
         )
-    _create_links(journal, faults)
-    journal["state"] = "complete"
-    journal["completed_at"] = clock()
-    journal["message"] = "published"
-    save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.complete")
+    except BaseException:
+        _restore_publish_baseline(journal)
+        journal["state"] = "built"
+        journal["message"] = "publish interrupted; old live tree restored"
+        save_journal(
+            journal_path(spec.state_root, journal["run_id"]),
+            journal,
+            FaultInjector(),
+            "journal.restored",
+        )
+        raise
 
 
 def _clear_stage_modules(generation_root):
@@ -565,7 +770,7 @@ def _select_backend(spec, probes):
 
 
 def run(spec):
-    """Build into a new generation, then publish by replacing module files."""
+    """Build into a new generation, then swap it with the live directory."""
     _check_roots(spec)
     faults = _faults(spec)
     probes = spec.probes if spec.probes is not None else probe_all(spec.software, spec.eb_executable)
@@ -612,7 +817,7 @@ def _spec_from_journal(journal, builder, faults, clock, lock_timeout):
         state_root=journal["state_root"],
         eb_args=list(journal.get("eb_args") or []),
         backend=journal["backend"],
-        grace_hours=journal.get("grace_hours") or 144.0,
+        grace_hours=journal.get("grace_hours") or DEFAULT_GRACE_HOURS,
         module_rels=list(journal.get("module_rels") or []),
         eb_executable=journal.get("eb_executable") or "eb",
         builder=builder,
@@ -629,6 +834,8 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
     """Continue a run. A finished run is a no-op. A rolled-back run is refused."""
     path = journal_path(state_root, run_id)
     journal = load_journal(path)
+    if journal.get("kind") == "retire":
+        raise Refused(f"run {run_id} is a retire record; rollback restores the module file")
     faults = faults or FaultInjector()
     spec = _spec_from_journal(journal, builder, faults, clock, lock_timeout)
     _check_roots(spec)
@@ -662,45 +869,32 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
         lock.release()
 
 
-def _restore_one(mod, faults):
-    live = mod["live_module"]
-    kind = lstat_kind(live)
-    if kind == "symlink":
-        raise Refused(f"refusing to roll back through a symlink at {live}")
-    if mod.get("status") == "restored":
-        return
-    if mod["existed"]:
-        if kind == "file" and sha256_bytes(read_bytes(live)) == mod["old_hash"]:
-            mod["status"] = "restored"
-            return
-        backup = mod["backup"]
-        if lstat_kind(backup) != "file":
-            raise NeedsIntervention(f"no backup to restore for {mod['rel']}")
-        previous = read_bytes(backup)
-        if sha256_bytes(previous) != mod["old_hash"]:
-            raise NeedsIntervention(f"backup for {mod['rel']} does not match the recorded module file")
-        if kind == "file" and sha256_bytes(read_bytes(live)) != mod["new_hash"]:
-            raise NeedsIntervention(
-                f"{live} is neither the published module file nor the backed-up one"
+def _restore_published_baseline(journal):
+    """Undo a failed explicit rollback and return to the published generation."""
+    silent = FaultInjector()
+    for mod in journal.get("modules_plan") or []:
+        recover_interrupted_swap(mod["live_software"], mod["retired"])
+        live_run = _tree_run_id(mod["live_software"])
+        retired_run = _tree_run_id(mod["retired"])
+        if live_run != journal["run_id"] and retired_run == journal["run_id"]:
+            swap_directories(
+                mod["live_software"],
+                mod["retired"],
+                allow_exchange=_allow_exchange(journal),
+                faults=silent,
+                step_prefix=f"rollback-recover:{mod['rel']}",
             )
-        if kind not in ("file", "missing"):
-            raise Refused(f"{live} is not a regular file")
-        atomic_write(live, previous, faults, f"rollback.file:{mod['rel']}")
-        mod["status"] = "restored"
-        return
-    if kind == "missing":
-        mod["status"] = "restored"
-        return
-    if kind == "file" and sha256_bytes(read_bytes(live)) == mod["new_hash"]:
-        faults.reach(f"rollback.remove:{mod['rel']}")
-        os.remove(live)
-        mod["status"] = "restored"
-        return
-    raise NeedsIntervention(f"{live} is not the module file this run published")
+        elif live_run == journal["run_id"] and retired_run != journal["run_id"]:
+            pass
+        else:
+            raise NeedsIntervention(f"cannot restore published tree for {mod['rel']}")
+        _write_new_module(mod, silent)
+        mod["status"] = "published"
+    _create_links(journal, silent)
 
 
 def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
-    """Put back the previous module files. Generations are left on disk."""
+    """Exchange every retired tree back into place as one recoverable operation."""
     path = journal_path(state_root, run_id)
     faults = faults or FaultInjector()
     now = time.time if clock is None else clock
@@ -718,24 +912,51 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
             message = f"run {run_id} is already rolled back"
             _log(message)
             return Result(0, run_id, "rolled_back", message)
-        for link in journal.get("links_plan") or []:
-            if not link.get("created"):
-                continue
-            link_path = link["live_path"]
-            if lstat_kind(link_path) == "symlink" and os.readlink(link_path) == link["target"]:
-                faults.reach(f"rollback.unlink:{link['rel']}")
-                os.unlink(link_path)
-            link["created"] = False
-            link["status"] = "removed"
-        for mod in reversed(journal.get("modules_plan") or []):
-            _restore_one(mod, faults)
-            _log(f"restored {mod['rel']}")
-            save_journal(path, journal, faults, f"journal.restore:{mod['rel']}")
-        journal["state"] = "rolled_back"
-        journal["rolled_back_at"] = now()
-        journal["message"] = "rolled back"
-        save_journal(path, journal, faults, "journal.rolled_back")
-        message = f"run {run_id} rolled back; generation kept at {journal['generation_root']}"
+        if journal["state"] != "complete":
+            raise Refused(f"run {run_id} is {journal['state']}; only a complete run can roll back")
+        try:
+            for mod in reversed(journal.get("modules_plan") or []):
+                result = swap_directories(
+                    mod["live_software"],
+                    mod["retired"],
+                    allow_exchange=_allow_exchange(journal),
+                    faults=faults,
+                    step_prefix=f"rollback.swap:{mod['rel']}",
+                )
+                mod["status"] = "restoring"
+                mod["rollback_method"] = result.method
+                save_journal(path, journal, faults, f"journal.rollback-swap:{mod['rel']}")
+            for mod in reversed(journal.get("modules_plan") or []):
+                _restore_old_module(mod, faults)
+                mod["status"] = "restored"
+                _log(f"restored {mod['rel']}")
+                save_journal(path, journal, faults, f"journal.restore:{mod['rel']}")
+            for link in journal.get("links_plan") or []:
+                if not link.get("created"):
+                    continue
+                link_path = link["live_path"]
+                if lstat_kind(link_path) == "symlink" and os.readlink(link_path) == link["target"]:
+                    faults.reach(f"rollback.unlink:{link['rel']}")
+                    os.unlink(link_path)
+                    fsync_dir(os.path.dirname(link_path))
+                link["created"] = False
+                link["status"] = "removed"
+            journal["state"] = "rolled_back"
+            journal["rolled_back_at"] = now()
+            journal["message"] = "rolled back"
+            save_journal(path, journal, faults, "journal.rolled_back")
+        except BaseException:
+            try:
+                _restore_published_baseline(journal)
+                journal["state"] = "complete"
+                journal["message"] = "rollback interrupted; published tree restored"
+                save_journal(path, journal, FaultInjector(), "journal.rollback-restored")
+            except BaseException as recovery_error:
+                raise NeedsIntervention(
+                    f"rollback failed and the published tree could not be restored: {recovery_error}"
+                ) from recovery_error
+            raise
+        message = f"run {run_id} rolled back; replacement kept at its retired path"
         _log(message)
         return Result(0, run_id, "rolled_back", message)
     finally:
@@ -760,7 +981,7 @@ def _dry_run(spec, probes, faults):
         + ("yes" if exchange.get("ok") else "no"),
         "easybuild: " + (easybuild.get("version_text") or easybuild.get("reason") or "not found"),
         "flock cross-node: unmeasured (open-004)",
-        "publish: replace each module file in place; do not rename the software directory",
+        "publish: renameat2(RENAME_EXCHANGE), with a restoring ordinary-rename fallback",
     ]
     problems = []
     if spec.backend == "bwrap" and not bwrap.get("usable"):

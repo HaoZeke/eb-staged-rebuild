@@ -1,26 +1,13 @@
-"""Remove retired generations. Never a live software directory.
+"""Remove hidden trees retired by successful swaps or explicit rollbacks.
 
-A generation under ``<state-root>/generations/<run-id>`` can be removed when
-no live module file resolves inside it and a retirement time is known:
+The clock starts at publish or rollback.  The default grace period is the
+unmeasured value carried by ns-051; operators must replace it with the site's
+longest job plus a safety margin.  Cluster-wide ``lsof`` is not used.
 
-* a later run published a module whose previous root was inside it, or
-* this run was rolled back.
-
-The clock starts at that time, not at the moment ``gc`` is invoked. The wait
-is ``--grace-hours``. 144 is the figure carried from the staged-rebuild notes
-(120 hours plus a day). It is not a measured site walltime. Set it from the
-longest job the site will actually run. Cluster-wide ``lsof`` is not used.
-
-This does not search other installations for ``DT_RPATH`` or user scripts that
-embed the old path. An unreferenced generation with no retirement record is
-kept and reported. Paths outside ``generations/`` are never deleted, including
-the original ``software/<name>/<version>`` directory.
-
-A module file moved aside by ``retire`` starts the same clock for the software
-directory it named. Inside ``generations/`` that directory is removed with its
-generation. Anywhere else it is only reported, as ``manual``, once the grace
-period has passed and no tracked module file resolves inside it. gc does not
-delete outside ``generations/``.
+A module file moved aside by ``retire`` starts that same clock for the stable
+software directory the module named. gc reports that directory. It does not
+delete it: the directory is the path jobs already have open, and gc only
+removes a hidden sibling recorded by a directory swap.
 """
 
 import os
@@ -28,11 +15,36 @@ import shutil
 import time
 
 from eb_staged_rebuild.atomicio import read_bytes
+from eb_staged_rebuild.constants import SECONDS_PER_HOUR
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
 from eb_staged_rebuild.modulefile import parse_root
 from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
 from eb_staged_rebuild.retire import is_retire
+
+
+def _retirement(journal, mod, include_failed):
+    state = journal.get("state")
+    if state == "complete":
+        return mod.get("published_at"), "previous live tree"
+    if state == "rolled_back":
+        return journal.get("rolled_back_at"), "rolled-back candidate"
+    if include_failed and state == "failed" and mod.get("status") == "pending":
+        return journal.get("updated_at") or journal.get("created_at"), "failed candidate"
+    return None, f"state {state} is kept"
+
+
+def _safe_retired_path(mod):
+    live = abspath(mod.get("live_software") or "")
+    retired = abspath(mod.get("retired") or "")
+    if not live or not retired:
+        raise Refused("journal has no live/retired software path")
+    if live == retired or os.path.dirname(live) != os.path.dirname(retired):
+        raise Refused(f"refusing retired path that is not a live sibling: {retired}")
+    expected_prefix = f".{os.path.basename(live)}."
+    if not os.path.basename(retired).startswith(expected_prefix):
+        raise Refused(f"refusing unexpected retired path name: {retired}")
+    return retired
 
 
 def _live_roots(journals):
@@ -63,120 +75,30 @@ def _live_roots(journals):
     return roots
 
 
-def _referenced(generation, roots):
-    generation = abspath(generation)
+def _referenced(directory, roots):
+    directory = abspath(directory)
     for root in roots:
-        if root == generation or is_within(root, generation):
+        if is_within(root, directory):
             return True
     return False
-
-
-def _superseded_at(journal, journals):
-    generation = abspath(journal["generation_root"])
-    times = []
-    for other in journals:
-        if other.get("run_id") == journal.get("run_id"):
-            continue
-        if is_retire(other):
-            if other.get("state") == "retired" and other.get("retired_at") and is_within(
-                abspath(other["software_dir"]), generation
-            ):
-                times.append(other["retired_at"])
-            continue
-        for mod in other.get("modules_plan") or []:
-            if mod.get("status") != "published":
-                continue
-            previous = mod.get("previous_root")
-            published_at = mod.get("published_at")
-            if previous and published_at and is_within(abspath(previous), generation):
-                times.append(published_at)
-    if not times:
-        return None
-    return min(times)
-
-
-def _retirement(journal, journals, include_failed):
-    state = journal.get("state")
-    if state == "rolled_back":
-        return journal.get("rolled_back_at"), "rolled back"
-    if state == "complete":
-        when = _superseded_at(journal, journals)
-        if when is None:
-            return None, "unreferenced but no later publish records a retirement time"
-        return when, "superseded"
-    if include_failed and state == "failed":
-        published = [mod for mod in journal.get("modules_plan") or [] if mod.get("status") == "published"]
-        if published:
-            return None, "failed after a module was published"
-        when = journal.get("updated_at") or journal.get("created_at")
-        return when, "failed and unpublished"
-    return None, f"state {state} is kept for resume"
-
-
-def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
-    state_root = abspath(state_root)
-    generations = os.path.join(state_root, "generations")
-    journals = list_journals(state_root)
-    roots = _live_roots(journals)
-    actions = []
-    for journal in journals:
-        generation = journal.get("generation_root")
-        if is_retire(journal) or not generation:
-            continue
-        generation = abspath(generation)
-        if not is_within(generation, generations):
-            raise Refused(f"refusing to consider {generation}, outside {generations}")
-        if journal.get("generation_removed_at"):
-            continue
-        if not os.path.isdir(generation) or os.path.islink(generation):
-            continue
-        if _referenced(generation, roots):
-            actions.append({"path": generation, "action": "keep", "reason": "a live module resolves inside it"})
-            continue
-        when, why = _retirement(journal, journals, include_failed)
-        if when is None:
-            actions.append({"path": generation, "action": "keep", "reason": why})
-            continue
-        age = now - when
-        if age < grace_hours * 3600:
-            actions.append(
-                {
-                    "path": generation,
-                    "action": "keep",
-                    "reason": f"within grace ({why})",
-                    "retired_at": when,
-                }
-            )
-            continue
-        actions.append({"path": generation, "action": "remove", "reason": why, "retired_at": when})
-        if dry_run:
-            continue
-        shutil.rmtree(generation)
-        journal["generation_removed_at"] = now
-        journal["message"] = f"generation removed ({why})"
-        save_journal(journal_path(state_root, journal["run_id"]), journal, None, "journal.gc")
-    actions.extend(_retired_software(journals, roots, generations, grace_hours, now))
-    return actions
 
 
 def _iso(when):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
 
 
-def _retired_software(journals, roots, generations, grace_hours, now):
-    """Report software directories of retired module files that gc may not delete itself.
+def _retired_software(journals, roots, grace_hours, now):
+    """Report stable software directories named by retired module files.
 
-    A directory inside ``generations/`` is handled with its generation. The rest
-    is never deleted: the entry is ``keep`` while a tracked module still resolves
-    inside it or the grace period runs, then ``manual``.
+    gc never deletes these. A hidden previous tree from a directory swap is
+    removed by the caller. This entry is ``keep`` while a tracked module still
+    resolves inside the directory or the grace period runs, then ``manual``.
     """
     latest = {}
     for journal in journals:
         if not is_retire(journal) or journal.get("state") != "retired":
             continue
         directory = abspath(journal["software_dir"])
-        if is_within(directory, generations):
-            continue
         when = journal.get("retired_at")
         if when is None:
             continue
@@ -185,7 +107,7 @@ def _retired_software(journals, roots, generations, grace_hours, now):
     for directory in sorted(latest):
         if not os.path.isdir(directory):
             continue
-        ready = latest[directory] + grace_hours * 3600
+        ready = latest[directory] + grace_hours * SECONDS_PER_HOUR
         if _referenced(directory, roots):
             actions.append({"path": directory, "action": "keep", "reason": "a live module resolves inside it"})
         elif now < ready:
@@ -202,8 +124,65 @@ def _retired_software(journals, roots, generations, grace_hours, now):
                 {
                     "path": directory,
                     "action": "manual",
-                    "reason": f"ready to remove by hand after {_iso(ready)}; gc deletes only under generations/",
+                    "reason": (
+                        f"ready to remove by hand after {_iso(ready)}; "
+                        "gc does not delete the stable software directory"
+                    ),
                     "retired_at": latest[directory],
                 }
             )
+    return actions
+
+
+def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
+    state_root = abspath(state_root)
+    journals = list_journals(state_root)
+    actions = []
+    for journal in journals:
+        if is_retire(journal):
+            continue
+        changed = False
+        for mod in journal.get("modules_plan") or []:
+            if mod.get("retired_removed_at"):
+                continue
+            retired = _safe_retired_path(mod)
+            if lstat_kind(retired) != "dir":
+                continue
+            when, why = _retirement(journal, mod, include_failed)
+            if when is None:
+                actions.append({"path": retired, "action": "keep", "reason": why})
+                continue
+            age = now - when
+            if age < grace_hours * SECONDS_PER_HOUR:
+                actions.append(
+                    {
+                        "path": retired,
+                        "action": "keep",
+                        "reason": f"within grace ({why})",
+                        "retired_at": when,
+                    }
+                )
+                continue
+            actions.append(
+                {
+                    "path": retired,
+                    "action": "remove",
+                    "reason": why,
+                    "retired_at": when,
+                }
+            )
+            if dry_run:
+                continue
+            shutil.rmtree(retired)
+            mod["retired_removed_at"] = now
+            changed = True
+        if changed:
+            journal["message"] = "retired tree removed"
+            save_journal(
+                journal_path(state_root, journal["run_id"]),
+                journal,
+                None,
+                "journal.gc",
+            )
+    actions.extend(_retired_software(journals, _live_roots(journals), grace_hours, now))
     return actions

@@ -1,7 +1,3 @@
-"""Rebuild EasyBuild software into a new directory and publish it with the module file.
+"""Stage an EasyBuild rebuild, then exchange it with the stable live path."""
 
-The live software directory is not renamed or deleted. The module file is the
-pointer a job resolves, and it is replaced by one same-directory rename.
-"""
-
-__version__ = "0.1.0"
+__version__ = "0.2.0"
