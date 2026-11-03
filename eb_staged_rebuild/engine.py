@@ -19,6 +19,7 @@ from eb_staged_rebuild.builders import (
     installpath_command,
     installpath_dirs,
     run_command,
+    userns_command,
 )
 from eb_staged_rebuild.discover import (
     generation_for,
@@ -57,7 +58,7 @@ class Spec:
     modules: str
     state_root: str
     eb_args: list
-    backend: str = "installpath"
+    backend: str = "auto"
     grace_hours: float = 144.0
     dry_run: bool = False
     module_rels: list = field(default_factory=list)
@@ -101,6 +102,7 @@ class _Ctx:
         self.eb_args = list(spec.eb_args)
         self.faults = faults
         self.backend = spec.backend
+        self.probes = spec.probes
 
 
 def _check_roots(spec):
@@ -117,7 +119,7 @@ def _check_roots(spec):
         if kind == "symlink":
             raise Refused(f"modules path is a symlink: {spec.modules}")
         raise Refused(f"modules path is not a real directory: {spec.modules} ({kind})")
-    if spec.backend not in ("installpath", "bwrap"):
+    if spec.backend not in ("auto", "installpath", "bwrap", "userns"):
         raise Refused(f"unknown backend {spec.backend}")
 
 
@@ -242,7 +244,7 @@ def _read_bwrap_info(generation_root):
 
 
 def _stage_roots(spec, journal, generation_root):
-    if spec.backend == "installpath":
+    if spec.backend in ("installpath", "userns"):
         return (
             os.path.join(generation_root, "software"),
             os.path.join(generation_root, "modules"),
@@ -458,6 +460,14 @@ def _build(spec, journal, faults):
         journal["eb_command"] = cmd
         _log("running " + format_command(cmd))
         rc = run_command(cmd, env, faults, "build.invoke")
+    elif spec.backend == "userns":
+        software, modules = installpath_dirs(journal["generation_root"])
+        os.makedirs(software, exist_ok=True)
+        os.makedirs(modules, exist_ok=True)
+        cmd, env, _software, _modules = userns_command(ctx)
+        journal["eb_command"] = cmd
+        _log("running " + format_command(cmd))
+        rc = run_command(cmd, env, faults, "build.invoke")
     else:
         software, modules = installpath_dirs(journal["generation_root"])
         os.makedirs(software, exist_ok=True)
@@ -540,16 +550,43 @@ def _blank_journal(spec, run_id, probes, rels):
     }
 
 
+def _select_backend(spec, probes):
+    requested = spec.backend
+    if requested == "auto":
+        if (probes.get("bwrap") or {}).get("usable"):
+            selected = "bwrap"
+        elif (probes.get("userns_sandbox") or {}).get("usable"):
+            selected = "userns"
+        else:
+            selected = "installpath"
+        spec.backend = selected
+        return requested, selected
+    return requested, requested
+
+
 def run(spec):
     """Build into a new generation, then publish by replacing module files."""
     _check_roots(spec)
     faults = _faults(spec)
     probes = spec.probes if spec.probes is not None else probe_all(spec.software, spec.eb_executable)
+    spec.probes = probes
+    requested_backend, selected_backend = _select_backend(spec, probes)
+    if requested_backend == "auto" and selected_backend == "installpath":
+        _log(
+            "neither bubblewrap nor the user-namespace sandbox is usable; "
+            "using the unsandboxed install-path fallback"
+        )
     if spec.dry_run:
         return _dry_run(spec, probes, faults)
     if spec.backend == "bwrap" and not (probes.get("bwrap") or {}).get("usable"):
         reason = (probes.get("bwrap") or {}).get("reason") or "bwrap is not usable"
         raise Refused(f"{reason}; refusing to rebuild in place")
+    if spec.backend == "userns" and not (probes.get("userns_sandbox") or {}).get("usable"):
+        reason = (
+            (probes.get("userns_sandbox") or {}).get("reason")
+            or "the user-namespace sandbox is not usable"
+        )
+        raise Refused(f"{reason}; refusing to run the userns backend")
     rels = _learn_rels(spec, faults, _log)
     for rel in rels:
         _check_install_dir(spec.software, rel)
@@ -736,6 +773,8 @@ def _dry_run(spec, probes, faults):
     ctx = _Ctx(spec, os.path.join(spec.state_root, "generations", "<run-id>"), faults)
     if spec.backend == "bwrap":
         cmd, _env = bwrap_command(ctx)
+    elif spec.backend == "userns":
+        cmd, _env, _software, _modules = userns_command(ctx)
     else:
         cmd, _env, _software, _modules = installpath_command(ctx)
     lines.append("command: " + format_command(cmd))

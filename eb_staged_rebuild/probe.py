@@ -6,10 +6,21 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
-RENAME_EXCHANGE = 2
+# Linux UAPI include/uapi/linux/fs.h and include/uapi/linux/fcntl.h.
+RENAME_EXCHANGE = 1 << 1
 AT_FDCWD = -100
+VERSION_PROBE_TIMEOUT_SECONDS = 30
+CAPABILITY_PROBE_TIMEOUT_SECONDS = 60
+USER_NAMESPACE_FLAGS = (
+    "--user",
+    "--map-root-user",
+    "--mount",
+    "--fork",
+    "--kill-child",
+)
 
 # Keys read from easybuild/tools/bwrap.py at these tags. A version that is not
 # in this table is reported as unknown; the JSON written by a build is what a
@@ -47,11 +58,14 @@ def probe_bwrap():
             "version": None,
             "reason": "bwrap is not installed",
         }
-    version = _run([path, "--version"], 30)
+    version = _run([path, "--version"], VERSION_PROBE_TIMEOUT_SECONDS)
     version_text = ""
     if isinstance(version, subprocess.CompletedProcess) and version.returncode == 0:
         version_text = (version.stdout or version.stderr or "").strip()
-    probe = _run([path, "--dev-bind", "/", "/", "true"], 60)
+    probe = _run(
+        [path, "--dev-bind", "/", "/", "true"],
+        CAPABILITY_PROBE_TIMEOUT_SECONDS,
+    )
     if isinstance(probe, subprocess.CompletedProcess) and probe.returncode == 0:
         return {
             "installed": True,
@@ -92,6 +106,40 @@ def probe_user_namespaces():
     except (OSError, ValueError):
         out["unprivileged_userns_clone"] = None
     return out
+
+
+def probe_userns_sandbox():
+    """Test a user and mount namespace with a verified read-only bind mount."""
+    path = shutil.which("unshare")
+    result = {
+        "installed": bool(path),
+        "usable": False,
+        "path": path,
+        "reason": None,
+    }
+    if not path:
+        result["reason"] = "unshare is not installed"
+        return result
+    command = [
+        path,
+        *USER_NAMESPACE_FLAGS,
+        sys.executable,
+        "-m",
+        "eb_staged_rebuild.userns_sandbox",
+        "--probe",
+    ]
+    probe = _run(command, CAPABILITY_PROBE_TIMEOUT_SECONDS, env=os.environ.copy())
+    if isinstance(probe, subprocess.CompletedProcess) and probe.returncode == 0:
+        result["usable"] = True
+        return result
+    if isinstance(probe, subprocess.CompletedProcess):
+        detail = (probe.stderr or probe.stdout or "").strip()
+        result["reason"] = f"user-namespace probe exited {probe.returncode}"
+        if detail:
+            result["reason"] += f": {detail}"
+    else:
+        result["reason"] = f"user-namespace probe failed: {probe}"
+    return result
 
 
 def filesystem(path):
@@ -191,7 +239,7 @@ def _import_bwrap_keys(eb_path):
         "import easybuild.tools.bwrap as b\n"
         "print(json.dumps(sorted(b._bwrap_info)))\n"
     )
-    proc = _run([python, "-c", code], 60)
+    proc = _run([python, "-c", code], CAPABILITY_PROBE_TIMEOUT_SECONDS)
     if not isinstance(proc, subprocess.CompletedProcess) or proc.returncode != 0:
         return None
     try:
@@ -220,7 +268,7 @@ def probe_easybuild(eb="eb"):
     if not path:
         result["reason"] = f"{eb} was not found on PATH"
         return result
-    proc = _run([path, "--version"], 60)
+    proc = _run([path, "--version"], CAPABILITY_PROBE_TIMEOUT_SECONDS)
     if not isinstance(proc, subprocess.CompletedProcess):
         result["reason"] = str(proc)
         return result
@@ -254,6 +302,7 @@ def probe_all(directory, eb="eb"):
     return {
         "bwrap": probe_bwrap(),
         "user_namespaces": probe_user_namespaces(),
+        "userns_sandbox": probe_userns_sandbox(),
         "rename_exchange": probe_rename_exchange(directory),
         "easybuild": probe_easybuild(eb),
         "filesystem": filesystem(directory),

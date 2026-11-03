@@ -23,6 +23,7 @@ class ProbeTests(unittest.TestCase):
             report = probe_all(root, eb="eb-not-installed-for-this-test")
         self.assertIn("bwrap", report)
         self.assertIn("user_namespaces", report)
+        self.assertIn("userns_sandbox", report)
         self.assertEqual(report["flock"]["cross_node"], "unmeasured")
         self.assertFalse(report["easybuild"]["found"])
 

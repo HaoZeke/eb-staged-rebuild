@@ -64,7 +64,15 @@ def _parser():
 
     run_p = sub.add_parser("run", help="build a generation and publish its module files")
     _add_common(run_p)
-    run_p.add_argument("--backend", choices=("installpath", "bwrap"), default="installpath")
+    run_p.add_argument(
+        "--backend",
+        choices=("auto", "bwrap", "userns", "installpath"),
+        default="auto",
+        help=(
+            "build isolation: auto tries bwrap, then a read-only user namespace, "
+            "then the unsandboxed install-path fallback"
+        ),
+    )
     run_p.add_argument("--grace-hours", type=float, default=None)
     run_p.add_argument("--dry-run", action="store_true")
     run_p.add_argument("--module", action="append", default=[], dest="module_rels", metavar="NAME/VERSION")
@@ -225,6 +233,7 @@ def _dispatch(args):
 def _print_probe(report):
     bwrap = report["bwrap"]
     namespaces = report["user_namespaces"]
+    userns = report["userns_sandbox"]
     exchange = report["rename_exchange"]
     easybuild = report["easybuild"]
     filesystem = report.get("filesystem") or {}
@@ -236,6 +245,9 @@ def _print_probe(report):
     print(f"user.max_user_namespaces: {namespaces.get('max_user_namespaces')}")
     if namespaces.get("unprivileged_userns_clone") is not None:
         print(f"kernel.unprivileged_userns_clone: {namespaces['unprivileged_userns_clone']}")
+    print(f"user-namespace sandbox: {'usable' if userns.get('usable') else 'not usable'}")
+    if userns.get("reason"):
+        print(f"  reason: {userns['reason']}")
     fstype = exchange.get("fstype") or filesystem.get("fstype")
     print(
         "RENAME_EXCHANGE: "

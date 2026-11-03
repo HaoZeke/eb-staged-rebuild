@@ -5,7 +5,9 @@ import os
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 
+from eb_staged_rebuild.builders import userns_command
 from eb_staged_rebuild.engine import Spec, run
 from eb_staged_rebuild.modulefile import parse_root
 from eb_staged_rebuild.probe import stage_paths_from_bwrap_info
@@ -125,6 +127,50 @@ class FakeEbTests(unittest.TestCase):
         self.assertIn("namespaces", str(caught.exception))
         self._assert_live_untouched()
         self.assertFalse(os.path.isdir(os.path.join(self.state, "generations")))
+
+    def test_auto_prefers_bwrap(self):
+        result = run(self._spec("auto"))
+        self.assertEqual(result.returncode, 0, result.message)
+        commands = [json.loads(line) for line in open(self.argv, encoding="utf-8")]
+        self.assertIn("--bwrap", commands[-1])
+
+    def test_auto_uses_installpath_when_no_sandbox_is_available(self):
+        probes = _probes((5, 4, 2), True)
+        probes["bwrap"]["usable"] = False
+        probes["bwrap"]["reason"] = "disabled"
+        probes["userns_sandbox"] = {
+            "installed": True,
+            "usable": False,
+            "path": "unshare",
+            "reason": "disabled",
+        }
+        result = run(self._spec("auto", probes))
+        self.assertEqual(result.returncode, 0, result.message)
+        commands = [json.loads(line) for line in open(self.argv, encoding="utf-8")]
+        self.assertNotIn("--bwrap", commands[-1])
+        self.assertTrue(
+            any(argument.startswith("--installpath-software=") for argument in commands[-1])
+        )
+
+    def test_userns_command_mounts_both_live_trees_read_only(self):
+        context = SimpleNamespace(
+            generation_root=os.path.join(self.root, "generation"),
+            eb_executable=FAKE_EB,
+            eb_args=[os.path.join(self.root, "demo-1.eb")],
+            software=self.software,
+            modules=self.modules,
+            probes={
+                "userns_sandbox": {
+                    "path": "/usr/bin/unshare",
+                }
+            },
+        )
+        command, _env, _software, _modules = userns_command(context)
+        self.assertEqual(command[0], "/usr/bin/unshare")
+        self.assertEqual(command.count("--read-only"), 2)
+        self.assertIn(self.software, command)
+        self.assertIn(self.modules, command)
+        self.assertIn("eb_staged_rebuild.userns_sandbox", command)
 
 
 class BwrapInfoTests(unittest.TestCase):
