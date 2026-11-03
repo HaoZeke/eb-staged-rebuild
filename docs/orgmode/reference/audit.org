@@ -1,0 +1,131 @@
+#+title: Audit of 8e7b6d66 against its design inputs
+
+This audit is for the unmodified repository at =8e7b6d66=. "Repository
+design" means its =DESIGN.md=, =README.md=, and =docs/runbook.md=. "Staged
+rebuild design" means =ns-050= through =ns-054= and appendix B in the supplied
+notes.
+
+* Divergences from the staged-rebuild design
+
+1. The implementation deliberately did not swap
+   =software/Name/version=. It published a module file pointing under
+   =<state-root>/generations=. =ns-051= specifies a staged-directory exchange.
+2. =RENAME_EXCHANGE= was only probed. No publish or rollback path called it.
+3. The ordinary-rename fallback in =ns-053= did not exist. The only test for
+   it manually demonstrated that a failed second rename leaves the live name
+   missing.
+4. Rollback restored module files only. It did not put the previous software
+   tree back at the stable path.
+5. The default backend was an unsandboxed install-path build. Bubblewrap was
+   opt-in, and there was no user/mount-namespace sandbox.
+6. There was no automatic, documented bwrap -> userns -> installpath fallback.
+7. Failure injection covered journals and module-file replacement, but not
+   exchange errors, any ordinary-rename step, or restoring a failed swap.
+8. The successful-path tests asserted that the live directory inode and bytes
+   never changed. That tests the generation-pointer design, not the requested
+   staged-tree switch.
+9. Multi-module publish could intentionally stop with some module files on the
+   new generation and others on the old one. =resume= or =rollback= repaired
+   it later; a caught failure did not restore the whole transaction.
+10. =open-004= was restated but had no recommended answer for any of its five
+    measurements.
+11. The user-visible behavior had Markdown documentation only. There was no
+    Org-mode how-to/reference and no changelog entry.
+
+* Internal code/documentation divergences at 8e7b6d66
+
+1. The design said dependencies are published first, and the project supports
+   both Lua and Tcl module files. Dependency extraction only recognised Lua
+   =load("...")= and =depends_on("...")=; Tcl dependencies silently fell back
+   to path order.
+2. The live-change check was described as detecting a changed software
+   directory. Its snapshot recorded names, inode numbers, and sizes, not file
+   contents. An in-place write that kept inode and size was not detected.
+3. =--skip-live-check= disabled that protection from the public CLI, but none
+   of the three design documents described the option or its effect.
+4. User-supplied =--module= values and module names parsed from EasyBuild dry
+   run output were joined to the software root without rejecting =..=.
+   A crafted value could make preflight inspect outside the configured tree.
+5. A missing live module file under a symlinked subdirectory bypassed
+   =assert_real_components=: the refusal was conditional on the file already
+   existing. The later atomic write could therefore follow a symlinked parent,
+   despite the runbook's symlink safety claim.
+6. =bwrap_info.json= supplied stage software and module roots were not required
+   to remain under the run's generation directory. The code trusted those
+   paths after checking only that module roots were under the reported stage
+   software root.
+7. For a previously missing install, the bwrap path allowed EasyBuild to
+   create an empty live mount-point directory and removed it after the build.
+   That changes the live namespace during a build, while the top-level
+   documentation said the live software directory was not renamed or deleted
+   and implied it was untouched.
+8. The fixed atomic-write temporary name
+   =.<destination>.new= was protected against symlinks but not against an
+   existing hard link. In a module directory writable by another principal,
+   opening it with =O_TRUNC= could truncate the hard-linked inode.
+9. The state root itself was not checked for symlink components before lock
+   and journal creation, although software and module roots were required to
+   be real directories.
+10. Raw =OSError= failures from filesystem operations were outside the CLI's
+    handled error classes and produced a traceback instead of the documented
+    refusal/intervention style.
+11. The tests emitted many =ResourceWarning= messages because fixtures used
+    unclosed =open(...)= handles. The suite passed, but warning-clean execution
+    was not achieved.
+12. The runbook said a symlink at =software/Name/version= or the module file
+    stops the run before EasyBuild. That was true only when =--module= or the
+    preflight parser already knew the software relative path. Module-file
+    symlinks and newly discovered install paths were refused in planning after
+    EasyBuild had run.
+13. The runbook said a zero =user.max_user_namespaces= makes the bwrap backend
+    refuse. The code reported that sysctl but gated only on the executable
+    bwrap probe. A supported setuid bwrap could succeed with a zero sysctl, so
+    the literal claim and enforcement differed.
+14. The runbook described the lock as covering the start of the build through
+    publish. The normal run executed an EasyBuild =--dry-run= module preflight
+    before taking the lock. It also did not document that normal operation can
+    invoke EasyBuild twice.
+15. Dry-run checked a named software-directory symlink, but it did not check
+    the corresponding live module file symlink. The runbook's symlink section
+    did not distinguish this dry-run exception.
+16. Public behavior was undocumented for =--run-id=, =--lock-timeout=,
+    =--skip-live-check=, =EB_STAGED_REBUILD_STATE_ROOT=,
+    =EB_STAGED_REBUILD_GRACE_HOURS=, and =EB_STAGED_REBUILD_EB=.
+17. =gc= did not acquire the run lock. A collector could race a publish or
+    rollback, despite the broader lock-and-journal safety story. Separate
+    state roots also meant separate locks could target the same live trees.
+18. =atomic_write='s explanatory string appeared after an executable
+    statement, so Python did not expose it as the function docstring.
+19. One corrupt journal made =status= fail while listing all runs; the
+    operator documentation did not describe that failure mode.
+20. A refusal or crash partway through planning could leave prepared module
+    files and completion stamps while the journal still said =building=. The
+    cleanup/retry behavior for those partial planning artifacts was not
+    documented.
+21. =resolve= accepted the pre-publish completion stamp as sufficient. A
+    staged directory could therefore report =complete= before it had ever
+    been published; the runbook listed the stamp but did not distinguish
+    staged from live completeness.
+22. The README said the real bwrap integration is a strict prerequisite test
+    once integration testing is enabled, but the bwrap case skipped when the
+    host probe failed. Missing EasyBuild and Lmod were failures; missing usable
+    bwrap was not.
+
+* Documented guarantees without a dedicated baseline test
+
+The baseline fault sweep covered many of these paths indirectly, but it had no
+focused assertion for: live-manifest refusal; dry-run refusal status 2;
+=gc --include-failed=; symlinked staged =modules/=; class-link creation and
+rollback failures; resume from every table state; lock coverage across a
+blocked build; unknown/current module hash intervention; and a corrupt
+journal during =status=. These are coverage gaps, not proof that the code
+behaved differently.
+
+* Correctly implemented design points at 8e7b6d66
+
+The audit did not count matching behavior as a divergence. In particular, the
+baseline already had advisory =flock= locking, durable JSON journals, a
+no-write dry-run, bwrap capability and exchange probes, EasyBuild 5.3.0/5.3.1
+layout handling, overlay refusal, real-directory and module-symlink checks,
+module-file rollback, retention grace, and extensive module-pointer failure
+injection. Those pieces were retained or adapted rather than claimed as new.

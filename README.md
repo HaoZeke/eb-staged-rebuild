@@ -1,58 +1,78 @@
 # eb-staged-rebuild
 
-Rebuild an EasyBuild install without emptying the live prefix.
+Rebuild an EasyBuild install in a staged tree, then exchange the complete tree
+with the stable `software/<name>/<version>` directory.
 
-`eb --rebuild` and `eb --force` clear the install directory during the build. This tool installs into a new directory and then publishes that directory by replacing the module file. `software/<name>/<version>` stays a real directory. It is not renamed, and it is not replaced with a symlink.
-
-The module file is the pointer. It is written to a temporary name in the same directory and moved into place with one `rename`. Jobs that already loaded the module keep the old paths. Jobs that load it afterwards see one complete generation. Old generations stay until a grace period has passed.
-
-EasyBuild's `--installpath-software` and `--installpath-modules` are enough to build the new directory. `--bwrap` (EasyBuild 5.3 and later) is optional. The switch runs in this process, after `eb` exits, because hooks run inside the build and inside the sandbox when `--bwrap` is on.
+The default backend tries EasyBuild bubblewrap, then a user/mount namespace
+that makes both live trees read-only, then an unsandboxed install-path
+fallback. Publish uses `renameat2(RENAME_EXCHANGE)` when the target filesystem
+supports it. The ordinary-rename fallback restores the old live name after
+every caught failure.
 
 Author: Rohit Goswami &lt;rgoswami@ieee.org&gt;. License: MIT.
 
 ## Install
 
-Python 3.11 or newer. The standard library is enough.
+Python 3.11 or newer is required. The standard library is sufficient.
 
 ```bash
 python3 -m pip install .
-# or, from this directory:
 python3 -m eb_staged_rebuild --help
 ```
 
-## Run
+## Probe and run
 
 ```bash
-eb-staged-rebuild probe --path /path/to/software
+eb-staged-rebuild probe --path "$EASYBUILD_INSTALLPATH_SOFTWARE"
+
 eb-staged-rebuild run \
   --software "$EASYBUILD_INSTALLPATH_SOFTWARE" \
   --modules "$EASYBUILD_INSTALLPATH_MODULES" \
   --dry-run \
-  -- file.eb --robot
+  -- example.eb --robot
+
 eb-staged-rebuild run \
   --software "$EASYBUILD_INSTALLPATH_SOFTWARE" \
   --modules "$EASYBUILD_INSTALLPATH_MODULES" \
-  -- file.eb --robot
+  -- example.eb --robot
 ```
 
-`--software` and `--modules` are the live trees. They also come from `EASYBUILD_INSTALLPATH_SOFTWARE` and `EASYBUILD_INSTALLPATH_MODULES`. The state directory defaults to `<parent of software>/.eb-staged-rebuild`.
+`--backend auto` is the default. The choices are `auto`, `bwrap`, `userns`,
+and `installpath`. Use `--backend bwrap` or `--backend userns` when an
+unsandboxed fallback must be forbidden. Use `--backend installpath` only when
+the documented fallback is acceptable.
 
-After a crash:
+`--eb` selects the EasyBuild executable (environment `EB_STAGED_REBUILD_EB`,
+default `eb`). `--run-id` names the journal instead of the generated id.
+`--lock-timeout` is how long to wait for `<state-root>/.lock`, in seconds;
+omitted, the wait has no deadline, and `retire` defaults to 0. `--module`
+names a `Name/version` to publish when EasyBuild's dry-run does not.
+`--skip-live-check` skips the before/after content record of the live install.
+`gc --include-failed` also removes the hidden sibling recorded for a failed
+run whose modules are still pending, once the grace period has passed.
+`resolve` prints the install path a module file names.
+
+The state directory defaults to a hidden sibling of the software tree. It must
+be on the same filesystem as the live installs.
+
+## Recovery
 
 ```bash
 eb-staged-rebuild status --state-root /path/to/.eb-staged-rebuild
 eb-staged-rebuild resume --state-root /path/to/.eb-staged-rebuild RUN_ID
 eb-staged-rebuild rollback --state-root /path/to/.eb-staged-rebuild RUN_ID
-```
-
-`rollback` restores the previous module files and leaves the generation on disk. For a retire it puts the module file back. `gc` removes a retired generation only after `--grace-hours` (default 144, from the notes, not a measured site limit) and only under the state directory's `generations/` folder.
-
-```bash
 eb-staged-rebuild gc --state-root /path/to/.eb-staged-rebuild --dry-run
-eb-staged-rebuild resolve /path/to/modules/all/Name/version.lua
 ```
 
-When a package installed here is later published elsewhere on `MODULEPATH` (for example a CVMFS repository), `retire` moves its module file out of the module tree, so users load the other copy, without touching `software/<name>/<version>`:
+`rollback` exchanges the retired directory back into the stable path. For a
+retire run it puts the module file back. `gc` deletes only a journaled hidden
+sibling after the grace period; it never deletes the stable live path. The
+default grace is 144 hours, the notes' unverified 120 hours plus a day.
+
+When a package installed here is later published elsewhere on `MODULEPATH`
+(for example a CVMFS repository), `retire` moves its module file out of the
+module tree, so users load the other copy, without touching
+`software/<name>/<version>`:
 
 ```bash
 eb-staged-rebuild retire \
@@ -62,18 +82,21 @@ eb-staged-rebuild retire \
   --dry-run
 ```
 
-Drop `--dry-run` to move the file. `rollback` with the printed `retire-<timestamp>` id puts it back. `gc` lists the software directory as ready to remove by hand once `--grace-hours` have passed. The state root must be on the same filesystem as the module tree.
+Drop `--dry-run` to move the file. `rollback` with the printed
+`retire-<timestamp>` id puts it back. `gc` lists the software directory as
+ready to remove by hand once `--grace-hours` have passed. The state root must
+be on the same filesystem as the module tree.
 
-The operator notes are in [docs/runbook.md](docs/runbook.md). The choice of design is in [DESIGN.md](DESIGN.md).
-
-## Tests
+## Test
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -v
 ```
 
-A real EasyBuild rebuild is skipped unless `EB_STAGED_REBUILD_INTEGRATION=1` and both `eb` and Lmod are on `PATH` (`LMOD_CMD` when Lmod is not already configured). With the variable set, a missing `eb` or Lmod is a failure.
+Set `EB_STAGED_REBUILD_INTEGRATION=1` to enable the real EasyBuild/Lmod tests.
+With that variable set, missing `eb` or Lmod is a failure. The bubblewrap case
+skips when `bwrap` is not usable on that host.
 
-## What this does not do
-
-It does not make an in-place rebuild safe. It does not update `DT_RPATH` or scripts that embed the old directory. It does not claim `flock` or `RENAME_EXCHANGE` work on a filesystem this process has not probed. `open-004` (the site's bubblewrap, sysctl, rename flag, cross-node lock, and EasyBuild version) stays open.
+See [DESIGN.md](DESIGN.md), [the runbook](docs/runbook.md), and the Org-mode
+[how-to](docs/orgmode/howto/staged-rebuild.org) and
+[reference](docs/orgmode/reference/staged-rebuild.org).

@@ -5,15 +5,22 @@ import os
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 
+from eb_staged_rebuild.builders import userns_command
 from eb_staged_rebuild.engine import Spec, run
 from eb_staged_rebuild.modulefile import parse_root
-from eb_staged_rebuild.probe import stage_paths_from_bwrap_info
+from eb_staged_rebuild.probe import probe_userns_sandbox, stage_paths_from_bwrap_info
 from eb_staged_rebuild.errors import Refused
 from tests.support import PROBES, classic_install
 
 
 FAKE_EB = os.path.join(os.path.dirname(__file__), "fake_eb.py")
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _probes(version, stage_keys):
@@ -65,16 +72,21 @@ class FakeEbTests(unittest.TestCase):
 
     def _assert_live_untouched(self):
         self.assertEqual(os.lstat(self.install).st_ino, self.inode)
-        self.assertEqual(open(os.path.join(self.install, "PAYLOAD"), encoding="utf-8").read(), "v0\n")
+        self.assertEqual(_read(os.path.join(self.install, "PAYLOAD")), "v0\n")
 
-    def test_installpath_publishes_generation_and_leaves_live_dir(self):
+    def _assert_switched(self):
+        self.assertNotEqual(os.lstat(self.install).st_ino, self.inode)
+        self.assertEqual(_read(os.path.join(self.install, "PAYLOAD")), "v1\n")
+        _syntax, root = parse_root(_read(self.module))
+        self.assertEqual(os.path.realpath(root), os.path.realpath(self.install))
+        retired = os.path.join(os.path.dirname(self.install), ".1.run1")
+        self.assertEqual(_read(os.path.join(retired, "PAYLOAD")), "v0\n")
+
+    def test_installpath_swaps_the_staged_generation(self):
         result = run(self._spec("installpath"))
         self.assertEqual(result.returncode, 0, result.message)
-        self._assert_live_untouched()
-        _syntax, root = parse_root(open(self.module, encoding="utf-8").read())
-        self.assertNotEqual(os.path.realpath(root), os.path.realpath(self.install))
-        self.assertEqual(open(os.path.join(root, "PAYLOAD"), encoding="utf-8").read(), "v1\n")
-        commands = [json.loads(line) for line in open(self.argv, encoding="utf-8")]
+        self._assert_switched()
+        commands = [json.loads(line) for line in _read(self.argv).splitlines()]
         build = commands[-1]
         joined = " ".join(build)
         self.assertIn("--installpath-software=", joined)
@@ -83,31 +95,41 @@ class FakeEbTests(unittest.TestCase):
         self.assertNotIn("--prefix", [arg.split("=", 1)[0] for arg in build])
         self.assertTrue(any(arg.startswith("--installpath-software=") and self.software not in arg for arg in build))
 
-    def test_bwrap_rewrites_root_and_does_not_exchange_directories(self):
+    def test_bwrap_swaps_the_staged_generation(self):
         result = run(self._spec("bwrap"))
         self.assertEqual(result.returncode, 0, result.message)
-        self._assert_live_untouched()
-        _syntax, root = parse_root(open(self.module, encoding="utf-8").read())
-        self.assertIn(os.path.join("generations", "run1"), root)
-        self.assertEqual(open(os.path.join(root, "PAYLOAD"), encoding="utf-8").read(), "v1\n")
+        self._assert_switched()
         self.assertFalse(os.path.islink(self.install))
+
+    def test_userns_build_mounts_live_trees_read_only_then_swaps(self):
+        probe = probe_userns_sandbox()
+        if not probe.get("usable"):
+            self.skipTest(probe.get("reason"))
+        result = run(self._spec("userns"))
+        self.assertEqual(result.returncode, 0, result.message)
+        self._assert_switched()
+        commands = [json.loads(line) for line in _read(self.argv).splitlines()]
+        self.assertNotIn("--bwrap", commands[-1])
+        self.assertTrue(
+            any(argument.startswith("--installpath-software=") for argument in commands[-1])
+        )
 
     def test_easybuild_53_layout_without_stage_keys(self):
         os.environ["FAKE_EB_KEYS"] = "legacy"
         result = run(self._spec("bwrap", _probes((5, 3, 1), False)))
         self.assertEqual(result.returncode, 0, result.message)
-        self._assert_live_untouched()
-        _syntax, root = parse_root(open(self.module, encoding="utf-8").read())
-        self.assertTrue(root.endswith(os.path.join("software", "demo", "1")))
-        self.assertEqual(open(os.path.join(root, "PAYLOAD"), encoding="utf-8").read(), "v1\n")
+        self._assert_switched()
+        _syntax, root = parse_root(_read(self.module))
+        self.assertEqual(os.path.realpath(root), os.path.realpath(self.install))
+        self.assertEqual(_read(os.path.join(root, "PAYLOAD")), "v1\n")
 
     def test_missing_stage_key_on_unknown_version_is_not_published(self):
         os.environ["FAKE_EB_KEYS"] = "legacy"
         result = run(self._spec("bwrap", _probes((5, 4, 1), None)))
         self.assertEqual(result.returncode, 2)
         self._assert_live_untouched()
-        self.assertIn('local root = "', open(self.module, encoding="utf-8").read())
-        self.assertIn(self.install, open(self.module, encoding="utf-8").read())
+        self.assertIn('local root = "', _read(self.module))
+        self.assertIn(self.install, _read(self.module))
 
     def test_overlay_upper_is_not_published(self):
         os.environ["FAKE_EB_OVERLAY"] = "1"
@@ -115,7 +137,7 @@ class FakeEbTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("overlay", result.message)
         self._assert_live_untouched()
-        self.assertEqual(open(self.module, encoding="utf-8").read(), self.v0)
+        self.assertEqual(_read(self.module), self.v0)
 
     def test_bwrap_refuses_when_probe_fails(self):
         probes = _probes((5, 4, 2), True)
@@ -125,6 +147,50 @@ class FakeEbTests(unittest.TestCase):
         self.assertIn("namespaces", str(caught.exception))
         self._assert_live_untouched()
         self.assertFalse(os.path.isdir(os.path.join(self.state, "generations")))
+
+    def test_auto_prefers_bwrap(self):
+        result = run(self._spec("auto"))
+        self.assertEqual(result.returncode, 0, result.message)
+        commands = [json.loads(line) for line in _read(self.argv).splitlines()]
+        self.assertIn("--bwrap", commands[-1])
+
+    def test_auto_uses_installpath_when_no_sandbox_is_available(self):
+        probes = _probes((5, 4, 2), True)
+        probes["bwrap"]["usable"] = False
+        probes["bwrap"]["reason"] = "disabled"
+        probes["userns_sandbox"] = {
+            "installed": True,
+            "usable": False,
+            "path": "unshare",
+            "reason": "disabled",
+        }
+        result = run(self._spec("auto", probes))
+        self.assertEqual(result.returncode, 0, result.message)
+        commands = [json.loads(line) for line in _read(self.argv).splitlines()]
+        self.assertNotIn("--bwrap", commands[-1])
+        self.assertTrue(
+            any(argument.startswith("--installpath-software=") for argument in commands[-1])
+        )
+
+    def test_userns_command_mounts_both_live_trees_read_only(self):
+        context = SimpleNamespace(
+            generation_root=os.path.join(self.root, "generation"),
+            eb_executable=FAKE_EB,
+            eb_args=[os.path.join(self.root, "demo-1.eb")],
+            software=self.software,
+            modules=self.modules,
+            probes={
+                "userns_sandbox": {
+                    "path": "/usr/bin/unshare",
+                }
+            },
+        )
+        command, _env, _software, _modules = userns_command(context)
+        self.assertEqual(command[0], "/usr/bin/unshare")
+        self.assertEqual(command.count("--read-only"), 2)
+        self.assertIn(self.software, command)
+        self.assertIn(self.modules, command)
+        self.assertIn("eb_staged_rebuild.userns_sandbox", command)
 
 
 class BwrapInfoTests(unittest.TestCase):

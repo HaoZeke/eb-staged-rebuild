@@ -1,0 +1,53 @@
+#+title: eb-staged-rebuild reference
+
+* Backends
+
+- =auto=: bwrap, then the verified user/mount namespace, then installpath.
+- =bwrap=: EasyBuild experimental bwrap; refuses when its probe fails.
+- =userns=: install-path build with live software and module trees mounted
+  read-only; refuses when =unshare= or the read-only bind probe fails.
+- =installpath=: unsandboxed fallback that writes to a separate stage.
+
+* Publish
+
+The preferred operation is Linux =renameat2(RENAME_EXCHANGE)=. The named
+=RENAME_EXCHANGE= constant is =1 << 1= from Linux
+=include/uapi/linux/fs.h=. Errors =EINVAL=, =ENOSYS=, and =EOPNOTSUPP=
+select the restoring ordinary-rename fallback.
+
+The fallback's hold path ends in =.fallback-old=. Every caught failure restores
+the original live and staged names. An uncatchable process or host failure is
+recovered from the hold path by =resume=. The fallback has a transient
+missing-name interval; exchange does not.
+
+* Lock and journal
+
+One advisory =flock= covers build, publish, resume, and rollback. The journal
+is under =<state-root>/runs/<run-id>/journal.json=. Cross-node lock coherence
+is not claimed until =open-004= is measured.
+
+* Retention constants
+
+=DEFAULT_GRACE_HOURS= is
+=NOTES_MAX_WALLTIME_HOURS + RETIREMENT_SAFETY_MARGIN_HOURS=, currently
+=120 + 24=. The source is =ns-051=; the 120-hour limit is not a site
+measurement.
+
+* Exit behaviour
+
+- 0: success, successful dry-run, or an idempotent completed operation.
+- 1: =resolve= found no complete installation, or EasyBuild returned 1.
+- 2: a safety check refused the operation or journal state needs intervention.
+- another non-zero value: the failed EasyBuild process's status.
+
+* open-004 recommendations
+
+1. Probe bwrap as the CI user; otherwise use the verified userns backend.
+2. Keep a documented non-zero user namespace allowance for the build account,
+   or deploy supported setuid bubblewrap.
+3. Probe exchange on the real shared filesystem. Require it where a transient
+   missing path is unacceptable.
+4. Test one lock from two build nodes. Use a scheduler singleton or measured
+   distributed lock if both acquire it.
+5. Pin EasyBuild 5.4.2 or a newer integration-tested release instead of
+   depending on legacy 5.3 layout inference.

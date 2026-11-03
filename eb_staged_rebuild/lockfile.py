@@ -21,6 +21,8 @@ import time
 
 from eb_staged_rebuild.errors import Refused
 
+LOCK_RETRY_INTERVAL_SECONDS = 0.02
+
 
 class FileLock:
     def __init__(self, state_root):
@@ -48,7 +50,7 @@ class FileLock:
                         raise Refused(
                             f"another eb-staged-rebuild holds the lock at {self.path}"
                         ) from exc
-                    time.sleep(0.02)
+                    time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
         os.ftruncate(self.fd, 0)
         os.write(self.fd, f"{os.getpid()}\n".encode())
 

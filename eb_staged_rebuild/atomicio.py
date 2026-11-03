@@ -2,6 +2,7 @@
 
 import os
 import stat
+import tempfile
 
 from eb_staged_rebuild.errors import Refused
 
@@ -24,10 +25,6 @@ def file_mode(path):
 
 
 def atomic_write(path, data, faults, step, mode=None):
-    if faults is None:
-        from eb_staged_rebuild.faults import FaultInjector
-
-        faults = FaultInjector()
     """Write ``data`` to ``path`` by renaming a complete temporary file in the same directory.
 
     Fault points, each raised before the action:
@@ -40,6 +37,10 @@ def atomic_write(path, data, faults, step, mode=None):
     file in the same directory is the publish step; it does not unlink the
     destination first.
     """
+    if faults is None:
+        from eb_staged_rebuild.faults import FaultInjector
+
+        faults = FaultInjector()
     if isinstance(data, str):
         data = data.encode("utf-8")
     path = os.fspath(path)
@@ -49,12 +50,8 @@ def atomic_write(path, data, faults, step, mode=None):
         raise Refused(f"refusing to replace a symlink: {path}")
     if mode is None:
         mode = file_mode(path)
-    tmp = os.path.join(parent, f".{os.path.basename(path)}.new")
-    if os.path.islink(tmp):
-        raise Refused(f"refusing to write through a symlink: {tmp}")
-
     faults.reach(f"{step}.write")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.new-", dir=parent)
     try:
         os.fchmod(fd, mode)
         view = memoryview(data)

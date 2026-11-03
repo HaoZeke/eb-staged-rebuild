@@ -1,7 +1,11 @@
 """Run EasyBuild so it writes a generation that is not the live software directory."""
 
 import os
+import shutil
 import subprocess
+import sys
+
+from eb_staged_rebuild.probe import USER_NAMESPACE_FLAGS
 
 # Options that would send the build at the live tree, or that delete a previous
 # install when the module file and the new install directory differ.
@@ -101,6 +105,27 @@ def bwrap_command(ctx):
     ]
     env = child_env(os.environ, ctx.software, ctx.modules, ctx.modules)
     return cmd, env
+
+
+def userns_command(ctx):
+    """Run an install-path build with both live trees mounted read-only."""
+    inner, env, software, modules = installpath_command(ctx)
+    report = (getattr(ctx, "probes", None) or {}).get("userns_sandbox") or {}
+    unshare = report.get("path") or shutil.which("unshare") or "unshare"
+    command = [
+        unshare,
+        *USER_NAMESPACE_FLAGS,
+        sys.executable,
+        "-m",
+        "eb_staged_rebuild.userns_sandbox",
+        "--read-only",
+        ctx.software,
+        "--read-only",
+        ctx.modules,
+        "--",
+        *inner,
+    ]
+    return command, env, software, modules
 
 
 def dry_run_command(ctx):

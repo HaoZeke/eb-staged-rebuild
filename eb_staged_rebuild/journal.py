@@ -6,7 +6,8 @@ import os
 from eb_staged_rebuild.atomicio import atomic_write, read_bytes
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 
-SCHEMA = 1
+# Schema 2 adds stable live, staged, and retired paths for directory swaps.
+SCHEMA = 2
 
 
 def journal_path(state_root, run_id):

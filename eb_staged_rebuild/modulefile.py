@@ -14,6 +14,7 @@ from eb_staged_rebuild.paths import abspath
 LUA_ROOT = re.compile(r'(?m)^local root\s*=\s*"((?:\\.|[^"\\])*)"\s*$')
 TCL_ROOT = re.compile(r'(?m)^set root\s+(?:"([^"]*)"|(\S+))\s*$')
 LOAD_STMT = re.compile(r'(?m)^\s*(?:load|depends_on)\("([^"]+)"\)')
+TCL_LOAD = re.compile(r'(?m)^\s*module\s+load\s+\{?([^\s}]+)\}?\s*$')
 
 
 def parse_root(text):
@@ -32,7 +33,8 @@ def parse_root(text):
 
 
 def loads(text):
-    return LOAD_STMT.findall(text)
+    """Dependency names from Lua ``load``/``depends_on`` and Tcl ``module load``."""
+    return LOAD_STMT.findall(text) + TCL_LOAD.findall(text)
 
 
 def replace_path(text, old, new):

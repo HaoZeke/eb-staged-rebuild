@@ -16,6 +16,12 @@ PROBES = {
         "path": "bwrap",
     },
     "user_namespaces": {"max_user_namespaces": None, "readable": False},
+    "userns_sandbox": {
+        "installed": True,
+        "usable": True,
+        "path": "unshare",
+        "reason": None,
+    },
     "rename_exchange": {"ok": False, "errno": 22, "error": "test", "fstype": "test"},
     "easybuild": {
         "found": True,

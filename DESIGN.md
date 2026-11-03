@@ -1,101 +1,216 @@
 # Design
 
-EasyBuild `--rebuild` and `--force` empty a live install while a build is still running. A later atomic rename of that same directory only shortens the empty window. It does not remove it, and it does not stop a job from seeing a mixture of two generations. This project does not publish by renaming `software/<name>/<version>`.
+EasyBuild `--rebuild` and `--force` empty an existing install before the new
+install has passed its sanity checks. This program never points EasyBuild at
+the live install for a staged build. It builds a complete replacement, takes
+one `flock` for the build and publish transaction, and then swaps the staged
+directory with `software/<name>/<version>`.
 
-## What EasyBuild does to an existing install
+The stable path remains a real directory. A successful rebuild changes the
+directory inode and contents at that path; the retired directory is kept as
+`software/<name>/.<version>.<run-id>` for rollback and for running processes
+that still hold old files open.
 
-Read from EasyBuild 5.4.2 (`easybuild/framework/easyblock.py`):
+## Build isolation
 
-* `make_installdir` calls `make_dir` with `cleanupoldinstall` and `clean_instead_of_remove=True`.
-* If the install directory exists and `cleanupoldinstall` is true, `clean_dir` empties it. If `cleanupoldinstall` is false, `make_dir` first copies the directory to `<installdir>.<timestamp>` and then still calls `clean_dir`. The copy is a backup. The live names are removed either way.
-* An easyblock that sets `build_in_installdir` forces `cleanupoldbuild` on and `cleanupoldinstall` off, then cleans the install directory at the start of `make_builddir`, because the build directory is the install directory.
-* `Binary.install_step` calls `clean_dir(self.installdir)` before copying files. `Tarball.install_step` does the same for the default install type.
+`--backend auto` selects these backends in order:
 
-`self.installdir` is `installpath-software` plus the naming scheme's install subdirectory (`gen_installdir`). It is not "the directory that currently exists under some other prefix". A build whose `--installpath-software` is a new directory does not call `clean_dir` on the old one.
+1. EasyBuild's experimental bubblewrap backend, after
+   `bwrap --dev-bind / / true` succeeds.
+2. `unshare` with a user and mount namespace. The helper bind-mounts the live
+   software and module trees read-only, verifies that the probe mount rejects a
+   write with `EROFS`, and runs an install-path build into the stage.
+3. The install-path fallback. It still sends EasyBuild to a separate software
+   and module tree, but it has no kernel sandbox. The command prints this
+   downgrade. Sites that require sandboxing should select `--backend bwrap` or
+   `--backend userns`; either explicit backend refuses instead of downgrading.
 
-`--remove-ghost-install-dirs` is different. `remove_module_file` deletes the install directory parsed out of a module file that already exists at the path EasyBuild is about to rewrite. The option is off by default. One local run set it true in a config file (`eb --show-config` reported `remove-ghost-install-dirs (F) = True`) and rebuilt with a fresh `--installpath-modules`. The previous install directory was still there when `eb` exited 0. That matches the code: the module file in the fresh module tree did not exist, so `remove_dir` was not called. A later run can see a module file left in the generation tree. For `--bwrap` that file names the live directory. This tool deletes `<generation>/modules` before each `eb` invocation, and refuses to do so if that path is a symlink, so a resumed build does not hand EasyBuild a module file that points at the live install.
+The fallback exists for hosts where bubblewrap is absent and unprivileged user
+namespaces are disabled. It protects against EasyBuild's normal cleanup paths,
+not against a hook that deliberately writes outside its configured install
+path.
 
-## What was checked, and what it showed
+EasyBuild options that could redirect the build are removed:
+`--prefix`, `--installpath*`, `--subdir-*`, `--bwrap*`, and
+`--remove-ghost-install-dirs`. `--rebuild` is added unless `--rebuild`,
+`--force`, or `-f` is already present.
 
-These are checks of EasyBuild itself, before this tool's publish step existed. The easyconfig was a `Binary` easyblock that installs one local file (`stagedemo/1`). EasyBuild was 5.4.2. The filesystem was ext4 on `/dev/vdc`. A thread sampled the live file every 5 ms.
+## Publish transaction
 
-* `eb --installpath-software=<other>/software --installpath-modules=<other>/modules --rebuild` left the live directory's inode at 422688, left the file contents as `payload-v1`, and wrote a module whose `local root` was the other directory. The sampler reported 2959 samples and 0 failures.
-* `eb --experimental --bwrap --bwrap-installpath=<stage> --rebuild` left the same live file in place (7703 samples, 0 failures). The staged module file's `local root` was the live path, because inside the bind mount that is the path EasyBuild sees. `bwrap_info.json` contained `bwrap_installpath_software` and `bwrap_installpath_modules`. The staged payload was `payload-v2`.
+For every module, planning:
 
-`easybuild/tools/bwrap.py` at the 5.3.0 and 5.3.1 tags does not write those two keys. The stage software directory in that file is `<bwrap_installpath>/software` and the stage module directory is `<bwrap_installpath>/modules`. The 5.4.0 and 5.4.2 tags do write the keys. 5.4.1 was not read. A missing key is not guessed except for 5.3.0 and 5.3.1, where the layout above is what the source joins.
+* requires an existing, non-symlink live `Name/version` directory;
+* verifies that the staged install is complete;
+* writes a run marker into the staged install;
+* prepares a module file whose root is the stable live path;
+* records and durably backs up the current module file; and
+* moves the stage to a hidden sibling on the same filesystem.
 
-Bubblewrap on this machine is 0.9.0. `bwrap --dev-bind / / true` exits 0. Binding a directory onto a symlink exited 1:
+Publish first attempts Linux `renameat2` with `RENAME_EXCHANGE` (`1 << 1`,
+from `include/uapi/linux/fs.h`). The syscall changes both directory names in
+one operation. `EINVAL`, `ENOSYS`, or `EOPNOTSUPP` selects the shared-filesystem
+fallback:
 
-```
-bwrap: Can't bind mount .../stage on .../live: Unable to mount source on destination: No such file or directory
-```
+1. rename live to `<staged>.fallback-old`;
+2. rename staged to live;
+3. rename the hold path to staged.
 
-That is not the message bubblewrap 0.12 prints, and it is not evidence about RHEL 9's 0.6.3, which the notes say follows the symlink. The tool refuses a symlink at `software/<name>/<version>` before it runs `eb`, whichever bubblewrap is installed.
+Every caught error or injected failure restores the original two names before
+it is re-raised. If a process or machine dies between fallback renames, the
+journal and the hold-name state let `resume` restore the old live name before
+trying again. This recovery cannot make the fallback's transient missing-name
+window atomic; only `RENAME_EXCHANGE` can do that. A deployment that requires
+an uninterrupted name must require a filesystem where the exchange probe
+succeeds.
 
-`renameat2(RENAME_EXCHANGE)` on this ext4 returned 0 and exchanged two directories. `/proc/sys/user/max_user_namespaces` was 192727. Neither number is a measurement of the site's GPFS or of a host where the STIG sets the sysctl to 0.
+For a multi-module build, all directory swaps happen before module files are
+published. If any swap, module write, class-link operation, or journal write
+fails, every completed module-file update and directory swap is reversed.
+Tests inject a failure before every recorded operation and verify that every
+live directory has its original inode and bytes afterwards.
 
-## Designs
+The module-file replacement is a same-directory `os.replace` after file and
+directory `fsync`. The directory swap is still not one atomic operation across
+several modules. Other users do not take this tool's advisory lock, so they can
+observe a mixed set while a successful multi-module transaction is in flight.
 
-### A. Repair the two-rename switch
+## Lock, resume, rollback, and collection
 
-Keep the prototype: build with `--bwrap`, then `renameat2(RENAME_EXCHANGE)` or two renames. Add a journal so a failed second rename puts the live directory back.
+One `flock` on `<state-root>/.lock` covers build, publish, resume, rollback,
+garbage collection, and their journal changes. It serialises processes that
+observe the same lock implementation. Cross-node coherence remains an
+`open-004` measurement.
 
-Rejected as the way a generation becomes visible. Between the two renames the live path does not exist; a crash there leaves it missing, which is the bug the review reproduced. `RENAME_EXCHANGE` is not part of the published GPFS interface the notes cite, and Lustre and Linux NFS return `EINVAL` for rename flags. A journal can heal that after the fact. It cannot make the missing name impossible. After a successful exchange the path is the same path jobs already have open, so a job can still read one file from the old generation and the next file from the new one (ns-054).
+The journal records the stage, stable path, retired path, hashes, and completed
+steps. `resume` is idempotent. It first recovers an interrupted fallback and
+normalises any interrupted publish to the old tree.
 
-### B. A symlink at `software/<name>/<version>`
+`rollback` exchanges each retired directory back into the stable path in
+reverse order and restores module files. A failed rollback reverses its own
+completed operations, leaving the published tree live.
 
-Point the stable path at the new generation with `symlink` plus `rename`.
+`gc` only removes the hidden retired sibling recorded in a journal. It never
+removes the stable path. The default grace is the notes' 120-hour walltime plus
+a 24-hour margin (`ns-051`); that walltime was not measured for this site and
+must be overridden after the site limit is known.
 
-Rejected. The path would no longer be a real directory. Bubblewrap 0.12 refuses to mount on a symlink; 0.6.3 follows one; 0.9.0 on this host failed the mount. Tools that store `realpath` keep a path that dangles when that generation is removed. Spack dropped symlinked views for this reason (the notes, ns-052).
+## Dry run
 
-### C. Generation directories, and the module file as the pointer
+`--dry-run` prints backend selection, probes, and the exact staged EasyBuild
+command. It does not invoke EasyBuild, create a journal, move a directory, or
+write a module file.
 
-Install into a directory that has never been the live install. Leave `software/<name>/<version>` where it is, as a real directory. Write the new module file to a temporary name in the module file's own directory, `fsync` it, and `os.replace` it onto the live module file. Same-directory `rename` over an existing file is the operation GPFS, Lustre, and NFS are being asked to do. It does not require `RENAME_EXCHANGE`.
+## Residual limits
 
-A job that already loaded the module keeps the old paths in its environment. A job that loads the module after the rename sees one complete module file, not a partial write. The old generation stays on disk until a grace period has passed and nothing this tool publishes still resolves to it.
-
-This is the design that was built. `--bwrap` remains an optional way to run the build. It is not the publish step. The publish step is the same module-file replace. Hooks run inside `eb`, and inside the sandbox when `--bwrap` is used, so they are not where the replace happens.
-
-EasyBuild does not need `--bwrap` to produce the generation directory. `--installpath-software` and `--installpath-modules` are enough, and they are the default backend. `--rebuild` is added when the caller did not pass `--rebuild` or `--force`, so an existing module does not cause `eb` to skip. `--prefix`, `--installpath`, `--bwrap*`, and `--remove-ghost-install-dirs` are stripped from the arguments this tool forwards.
-
-### D. Never-reused paths for every file a job might open
-
-Nix store paths, Spack hashes, or a per-job image. ns-054 is right that only a path which is never reused avoids a mixed view for every opener, including a process that does not go through the module file.
-
-Not built. It is a different install layout, and it does not fix a binary whose `DT_RPATH` already contains the old directory. Pretending a module-file update does that would be false.
-
-## What is rejected
-
-* Publishing by exchanging or double-renaming `software/<name>/<version>`.
-* A symlink at that path.
-* `cleanupoldinstall=False` as protection. The 5.4.2 `make_dir` still empties the directory after copying it aside.
-* Switching from an EasyBuild hook. The hook runs in the build, which is inside the sandbox when `--bwrap` is on.
-* `RENAME_EXCHANGE` as the correctness mechanism. It is probed and recorded. The publish path does not call it.
-* Deleting a generation because `lsof` on this node sees no users. Other nodes are invisible. Deletion waits for a grace period, and only for directories under `<state-root>/generations/`.
-* Guessing `bwrap_installpath_software` for an EasyBuild version whose `bwrap.py` was not read. 5.3.0 and 5.3.1 use the layout in their source. Anything else without the key is left unpublished.
-* Falling back from a failed `bwrap` probe to an in-place rebuild. The installpath backend does not need bubblewrap. The bwrap backend stops.
-
-## Residual risk
-
-* A module file replace is atomic for readers of that file. It is not atomic across several module files. A crash in the middle of a multi-module publish can leave one module on the new generation and another on the old. Each file still resolves to one complete generation. Dependencies are published first. `resume` finishes the list; `rollback` restores it in reverse.
-* Jobs, scripts, and `DT_RPATH` entries that do not read the module file keep the old directory. They do not see an empty prefix, and they do not see the rebuild. A security fix in a library does not move into a dependent until that dependent is rebuilt. `gc` does not search those binaries or home directories. It will not delete `software/<name>/<version>` at all. It deletes a generation under `<state-root>/generations/` only when no module file this tool tracks still resolves inside it, a later publish or a rollback recorded a time, and `--grace-hours` has passed. The default 144 is the figure from the notes (120 hours plus a day). It is not a measured site walltime.
-* `flock` serialises two runs on one kernel. Cross-node behaviour on GPFS or NFS was not measured (`open-004`).
-* Same-directory `rename` is what POSIX requires to be atomic. This repository has not measured it on the site's GPFS, Lustre, or NFS.
-* An EasyBuild configuration file can still enable `remove-ghost-install-dirs`. The one run described above did not delete the live tree. The staged module tree is removed before `eb` so a resume does not recreate the condition the option acts on. That is not a test of every EasyBuild configuration.
-* The original `software/<name>/<version>` directory remains forever unless an operator removes it by hand. Disk use grows with every generation that is still inside the grace period, and with that original directory after it is no longer the published root.
+* `RENAME_EXCHANGE` changes which inode a stable path names. A process that
+  opens one file before and another after the swap can still mix generations
+  (`ns-054`).
+* A process killed with `SIGKILL` during the ordinary-rename fallback cannot
+  execute in-process rollback. The next `resume` repairs the journaled state.
+* `flock` coherence across two build nodes is not assumed.
+* The unsandboxed fallback cannot constrain arbitrary EasyBuild hooks.
+* Neither `gc` nor the grace period can see open files on every cluster node.
+* A successful transaction is atomic per directory, not across several module
+  directories.
 
 ## Retiring a copy that moved elsewhere
 
-A package can be installed in this tree and later published somewhere that sits further along `MODULEPATH`, such as a CVMFS repository. Once that copy is verified, this tree's module file must stop being what users load, and running jobs must keep their software directory.
+A package can be installed in this tree and later published somewhere that sits
+further along `MODULEPATH`, such as a CVMFS repository. Once that copy is
+verified, this tree's module file must stop being what users load, and running
+jobs must keep their software directory.
 
-`retire` does this with the publish primitive. The module file is fsynced and moved with one `os.replace` to `<state-root>/retired/<timestamp>/<absolute path without the leading />`, then both directories are fsynced. A reader sees the module file or does not; a job that already loaded it keeps its paths. The software directory is not touched. A rename across filesystems is not atomic, so retire checks `st_dev` of the module directory against the destination and refuses with an error naming both when they differ.
+`retire` moves the module file with one `os.replace` to
+`<state-root>/retired/<timestamp>/<absolute path without the leading />`, after
+fsyncing the file and then both directories. A reader sees the module file or
+does not. A job that already loaded it keeps its paths. The stable software
+directory is not touched. A rename across filesystems is not atomic, so retire
+checks `st_dev` of the module directory against the destination and refuses
+when they differ.
 
-The record is a journal under `runs/retire-<timestamp>/` in the run journal format, with `kind` set to `retire`, the module path, the module hash, the software directory parsed from the module's root assignment, the reason, and the times. It is written as `retiring` before the rename and `retired` after it, so a crash between the two leaves a state `rollback` can resolve. A module file without a root assignment is refused, because the record would not know which directory it released. Retire also refuses a module path that is not a regular file (a symlink, a directory, a missing path), one already retired, and one whose state root lock is held (`--lock-timeout` defaults to 0, so it refuses at once).
+The record is a journal under `runs/retire-<timestamp>/` with `kind` set to
+`retire`, the module path, the module hash, the software directory parsed from
+the module's root assignment, the reason, and the times. It is written as
+`retiring` before the rename and `retired` after it, so a crash between the
+two leaves a state `rollback` can resolve. A module file without a root
+assignment is refused. Retire also refuses a path that is not a regular file,
+one already retired, and one whose state root lock is held (`--lock-timeout`
+defaults to 0, so it refuses at once).
 
-`rollback retire-<timestamp>` moves the file back with the same primitive and journals `rolled_back`. It refuses to overwrite a module file that exists again at the original path.
+`rollback retire-<timestamp>` moves the file back with the same primitive and
+journals `rolled_back`. It refuses to overwrite a module file that exists again
+at the original path.
 
-`gc` starts the grace clock at `retired_at`. The software directory is eligible only when `--grace-hours` have passed and no module file this tool tracks resolves inside it. Tracked files are the live modules of publish runs and the original path of any retire that was rolled back or interrupted. `gc` deletes only under `<state-root>/generations/`, and the retired software directory is normally the original `software/<name>/<version>` tree, outside it. So `gc` does not delete it. It reports the directory as `manual` with "ready to remove by hand after <time>", and as `keep` before that time. The one case `gc` deletes is a retired module whose software directory lies inside a generation: the retire time counts as that generation's retirement time, and the generation is removed with the usual rules. Widening what `gc` may delete to include the original install trees would let one wrong journal entry remove a directory a tool outside this one still loads, and nothing here can see those users.
+`gc` starts the grace clock for that software directory at `retired_at`. The
+directory is reported as `keep` while a tracked module file still resolves
+inside it or the grace period has not elapsed, then as `manual`. Tracked files
+are the live modules of publish runs and the original path of any retire that
+was rolled back or interrupted. gc does not delete that stable directory. It
+deletes only the hidden sibling a directory-swap journal recorded. Deleting the
+stable path from a retire record would let one wrong journal entry remove a
+directory a job outside this tool still has open.
 
-## open-004
+## `open-004` recommendations
 
-Still open. This machine is not a build node on the shared filesystem, and it is not the CI account. The probe reports bubblewrap, `user.max_user_namespaces`, `RENAME_EXCHANGE` on the directory you point it at, and the EasyBuild version it can see. Those answers are about the host that ran the probe.
+1. **Bubblewrap:** run `bwrap --dev-bind / / true` as the CI account. Use the
+   bwrap backend only when it succeeds; otherwise use the verified userns
+   backend.
+2. **User namespaces:** keep `user.max_user_namespaces` non-zero for the
+   dedicated build account under a documented exception. If policy forbids
+   that, use a supported setuid bubblewrap deployment or accept the explicitly
+   unsandboxed install-path fallback.
+3. **Directory exchange:** run `eb-staged-rebuild probe --path <software>` on
+   the actual shared filesystem. Require exchange for prefixes where a
+   transient missing name is unacceptable; otherwise use the restoring
+   fallback during a frozen release window.
+4. **Cross-node lock:** contend for the same lock from two build nodes. If both
+   acquire it, use a scheduler singleton or another measured distributed lock
+   before deployment.
+5. **EasyBuild:** pin the pipeline to 5.4.2 or a newer version validated by the
+   integration test. Do not rely on the inferred 5.3.0/5.3.1 JSON layout when
+   a pinned, tested release is available.
+
+## Baseline divergences
+
+The audit of unmodified `8e7b6d66` listed 11 differences from the staged-rebuild
+notes and 22 differences between that tree's own documents and its code. Each
+one is closed in this tree, or kept on purpose.
+
+### Staged-rebuild notes
+
+1. Closed. Publish exchanges `software/<name>/<version>` with the staged tree.
+2. Closed. Publish and rollback call `renameat2(RENAME_EXCHANGE)` when the probe succeeds.
+3. Closed. `EINVAL`, `ENOSYS`, and `EOPNOTSUPP` select the restoring three-rename fallback.
+4. Closed. Rollback puts the previous software tree back at the stable path. A retire record is only a module file, and rollback puts that file back.
+5. Closed. `--backend auto` is the default.
+6. Closed. The order is bubblewrap, then the user namespace, then installpath.
+7. Closed. Tests inject exchange failures, each ordinary-rename step, and restoration of a failed swap.
+8. Closed. A successful publish changes the live directory inode. Tests require the new bytes at that path.
+9. Closed. A caught failure reverses every completed swap and module-file update in that transaction.
+10. Closed. Each `open-004` measurement has a recommended answer above.
+11. Closed. `CHANGELOG.md` and the Org-mode how-to and reference describe the swap.
+
+### Repository documents at `8e7b6d66`
+
+1. Closed. Dependency order reads Lua `load` and `depends_on`, and Tcl `module load`. A cycle still finishes in path order.
+2. Closed. The live-change record includes a SHA-256 of each file's contents.
+3. Closed. `--skip-live-check` is documented. It skips that record.
+4. Closed. A `--module` value or a parsed module path that leaves the software or module root is refused.
+5. Closed. Symlink components of a module path are refused even when the file itself is still missing.
+6. Closed. Stage roots taken from `bwrap_info.json` must stay inside the run's generation directory.
+7. Closed. A missing `Name/version` is refused before EasyBuild. The build does not create the live directory.
+8. Closed. The temporary file for an atomic write is created with `mkstemp`, so the name is not a fixed hard-link target.
+9. Closed. The state root is refused when any existing component is a symlink.
+10. Closed. An `OSError` from the command line is printed as `eb-staged-rebuild:` and exits 2, without a traceback.
+11. Closed. The unit suite passes with `ResourceWarning` promoted to an error.
+12. Intended. The module preflight can run before a software-symlink refusal. The install build does not. A module-file symlink is refused in planning, after the build and before any swap, because the path may be known only from that preflight.
+13. Intended. Bubblewrap is accepted when `bwrap --dev-bind / / true` succeeds. `user.max_user_namespaces` is reported. A zero value does not by itself refuse a setuid bubblewrap that passes the probe.
+14. Closed. The runbook states that the preflight runs before the lock and that EasyBuild may run twice. The lock covers build, publish, resume, rollback, retire, and garbage collection.
+15. Intended. Dry-run checks the software directory named by `--module`. It does not check the live module file. That file is checked when a real run plans the publish.
+16. Closed. `--run-id`, `--lock-timeout`, `--skip-live-check`, `--eb`, `EB_STAGED_REBUILD_EB`, `EB_STAGED_REBUILD_STATE_ROOT`, and `EB_STAGED_REBUILD_GRACE_HOURS` are documented.
+17. Closed for the collector: `gc` holds the state-root lock. Intended for the rest: two state roots are two locks, even when both runs name the same live trees. One state root per live tree is the deployment rule.
+18. Closed. The explanation of `atomic_write` is its docstring.
+19. Intended. One unreadable journal makes `status` stop. A partial list would hide the broken run.
+20. Intended. A crash during planning can leave prepared module files while the journal still says `building`. `resume` from `building` rebuilds that generation.
+21. Intended. `resolve` calls a directory complete when it contains install metadata, including the stamp written before publish. That means the tree is complete, not that it is already the live path.
+22. Closed. With integration enabled, missing `eb` or Lmod fails the test. The bubblewrap case skips when that probe fails, and the README says so.

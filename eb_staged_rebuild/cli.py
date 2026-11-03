@@ -6,6 +6,7 @@ import os
 import sys
 
 from eb_staged_rebuild import __version__
+from eb_staged_rebuild.constants import DEFAULT_GRACE_HOURS
 from eb_staged_rebuild.engine import Spec, describe_module, resume, rollback, run
 from eb_staged_rebuild.errors import NeedsIntervention, Refused, StagedRebuildError
 from eb_staged_rebuild.gc import collect
@@ -36,13 +37,18 @@ def _state_root(value, software):
 def _grace(value):
     if value is not None:
         return value
-    return float(os.environ.get("EB_STAGED_REBUILD_GRACE_HOURS", "144"))
+    return float(
+        os.environ.get(
+            "EB_STAGED_REBUILD_GRACE_HOURS",
+            str(DEFAULT_GRACE_HOURS),
+        )
+    )
 
 
 def _add_common(parser):
     parser.add_argument("--software", help="live EASYBUILD_INSTALLPATH_SOFTWARE")
     parser.add_argument("--modules", help="live EASYBUILD_INSTALLPATH_MODULES")
-    parser.add_argument("--state-root", help="journal and generation root (default: <parent of software>/.eb-staged-rebuild)")
+    parser.add_argument("--state-root", help="journal and stage root (default: <parent of software>/.eb-staged-rebuild)")
     parser.add_argument("--eb", default=os.environ.get("EB_STAGED_REBUILD_EB", "eb"), help="EasyBuild executable")
 
 
@@ -50,8 +56,8 @@ def _parser():
     parser = argparse.ArgumentParser(
         prog="eb-staged-rebuild",
         description=(
-            "Rebuild EasyBuild software into a new generation directory and publish it "
-            "by replacing the module file. The live software directory is not emptied."
+            "Build EasyBuild software in a staged tree, then exchange the complete "
+            "tree with the stable live directory."
         ),
     )
     parser.add_argument("--version", action="version", version=f"eb-staged-rebuild {__version__}")
@@ -62,9 +68,17 @@ def _parser():
     probe.add_argument("--eb", default=os.environ.get("EB_STAGED_REBUILD_EB", "eb"))
     probe.add_argument("--json", action="store_true")
 
-    run_p = sub.add_parser("run", help="build a generation and publish its module files")
+    run_p = sub.add_parser("run", help="build and atomically swap a staged tree")
     _add_common(run_p)
-    run_p.add_argument("--backend", choices=("installpath", "bwrap"), default="installpath")
+    run_p.add_argument(
+        "--backend",
+        choices=("auto", "bwrap", "userns", "installpath"),
+        default="auto",
+        help=(
+            "build isolation: auto tries bwrap, then a read-only user namespace, "
+            "then the unsandboxed install-path fallback"
+        ),
+    )
     run_p.add_argument("--grace-hours", type=float, default=None)
     run_p.add_argument("--dry-run", action="store_true")
     run_p.add_argument("--module", action="append", default=[], dest="module_rels", metavar="NAME/VERSION")
@@ -83,10 +97,11 @@ def _parser():
     back_p.add_argument("--lock-timeout", type=float, default=None)
     back_p.add_argument("run_id")
 
-    gc_p = sub.add_parser("gc", help="remove retired generations after the grace period")
+    gc_p = sub.add_parser("gc", help="remove hidden retired siblings after the grace period")
     gc_p.add_argument("--state-root", required=True)
     gc_p.add_argument("--grace-hours", type=float, default=None)
     gc_p.add_argument("--dry-run", action="store_true")
+    gc_p.add_argument("--lock-timeout", type=float, default=None)
     gc_p.add_argument(
         "--include-failed",
         action="store_true",
@@ -107,7 +122,7 @@ def _parser():
     status_p.add_argument("--state-root", required=True)
     status_p.add_argument("run_id", nargs="?")
 
-    resolve_p = sub.add_parser("resolve", help="print the generation a module file points at")
+    resolve_p = sub.add_parser("resolve", help="print the install path a module file names")
     resolve_p.add_argument("module")
     return parser
 
@@ -127,6 +142,9 @@ def main(argv=None):
     try:
         code = _dispatch(args)
     except (Refused, NeedsIntervention, StagedRebuildError) as exc:
+        print(f"eb-staged-rebuild: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
         print(f"eb-staged-rebuild: {exc}", file=sys.stderr)
         return 2
     return code
@@ -181,6 +199,7 @@ def _dispatch(args):
             __import__("time").time(),
             dry_run=args.dry_run,
             include_failed=args.include_failed,
+            lock_timeout=args.lock_timeout,
         )
         for action in actions:
             print(f"{action['action']}: {action['path']} ({action['reason']})")
@@ -217,7 +236,10 @@ def _dispatch(args):
             if journal.get("message"):
                 print(f"  {journal['message']}")
             for mod in modules:
-                print(f"  {mod.get('status'):<10} {mod.get('rel')}  {mod.get('generation')}")
+                print(
+                    f"  {mod.get('status'):<10} {mod.get('rel')}  "
+                    f"live={mod.get('live_software')} retired={mod.get('retired')}"
+                )
         return 0
     raise Refused(f"unknown command {args.command}")
 
@@ -225,6 +247,7 @@ def _dispatch(args):
 def _print_probe(report):
     bwrap = report["bwrap"]
     namespaces = report["user_namespaces"]
+    userns = report["userns_sandbox"]
     exchange = report["rename_exchange"]
     easybuild = report["easybuild"]
     filesystem = report.get("filesystem") or {}
@@ -236,6 +259,9 @@ def _print_probe(report):
     print(f"user.max_user_namespaces: {namespaces.get('max_user_namespaces')}")
     if namespaces.get("unprivileged_userns_clone") is not None:
         print(f"kernel.unprivileged_userns_clone: {namespaces['unprivileged_userns_clone']}")
+    print(f"user-namespace sandbox: {'usable' if userns.get('usable') else 'not usable'}")
+    if userns.get("reason"):
+        print(f"  reason: {userns['reason']}")
     fstype = exchange.get("fstype") or filesystem.get("fstype")
     print(
         "RENAME_EXCHANGE: "

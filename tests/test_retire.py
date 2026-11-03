@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from eb_staged_rebuild.engine import Spec, rollback, run
+from eb_staged_rebuild.engine import Spec, resume, rollback, run
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 from eb_staged_rebuild.faults import FaultInjector, InjectedCrash
 from eb_staged_rebuild.gc import collect
@@ -37,6 +37,12 @@ def _tree(root):
     return software, modules, state, install, module, text
 
 
+
+def _read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _journal(state, run_id):
     return [j for j in list_journals(state) if j["run_id"] == run_id][0]
 
@@ -58,16 +64,16 @@ class RetireTests(unittest.TestCase):
             moved = journal["retired_path"]
             self.assertTrue(moved.startswith(os.path.join(state, "retired") + os.sep))
             self.assertTrue(moved.endswith(module.lstrip(os.sep)))
-            self.assertEqual(open(moved, encoding="utf-8").read(), text)
+            self.assertEqual(_read(moved), text)
             self.assertEqual(os.lstat(install).st_ino, inode)
-            self.assertEqual(open(os.path.join(install, "PAYLOAD"), encoding="utf-8").read(), "v0\n")
+            self.assertEqual(_read(os.path.join(install, "PAYLOAD")), "v0\n")
 
     def test_dry_run_changes_nothing(self):
         with tempfile.TemporaryDirectory() as root:
             _sw, _mods, state, _install, module, text = _tree(root)
             result = retire(state, module, dry_run=True)
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
             self.assertFalse(os.path.exists(state))
 
     def test_dry_run_still_refuses(self):
@@ -76,20 +82,30 @@ class RetireTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 retire(state, os.path.join(mods, "all"), dry_run=True)
 
+    def test_resume_refuses_a_retire_record(self):
+        with tempfile.TemporaryDirectory() as root:
+            _sw, _mods, state, _install, module, text = _tree(root)
+            result = retire(state, module, clock=Clock())
+            with self.assertRaises(Refused) as ctx:
+                resume(state, result.run_id)
+            self.assertIn("retire record", str(ctx.exception))
+            self.assertFalse(os.path.lexists(module))
+            self.assertEqual(_read(_journal(state, result.run_id)["retired_path"]), text)
+
     def test_rollback_puts_module_back(self):
         with tempfile.TemporaryDirectory() as root:
             _sw, _mods, state, _install, module, text = _tree(root)
             result = retire(state, module, clock=Clock())
             back = rollback(state, result.run_id, clock=Clock(T0 + 100))
             self.assertEqual(back.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
             journal = _journal(state, result.run_id)
             self.assertEqual(journal["state"], "rolled_back")
             self.assertIsNotNone(journal["rolled_back_at"])
             self.assertFalse(os.path.lexists(journal["retired_path"]))
             again = rollback(state, result.run_id)
             self.assertEqual(again.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
 
     def test_rollback_refuses_to_overwrite_a_new_module_file(self):
         with tempfile.TemporaryDirectory() as root:
@@ -99,7 +115,7 @@ class RetireTests(unittest.TestCase):
                 handle.write('local root = "/elsewhere"\n')
             with self.assertRaises(NeedsIntervention):
                 rollback(state, result.run_id)
-            self.assertEqual(open(module, encoding="utf-8").read(), 'local root = "/elsewhere"\n')
+            self.assertEqual(_read(module), 'local root = "/elsewhere"\n')
 
     def test_retire_again_after_rollback(self):
         with tempfile.TemporaryDirectory() as root:
@@ -151,7 +167,7 @@ class RetireTests(unittest.TestCase):
                 self.assertIn("lock", str(ctx.exception))
             finally:
                 lock.release()
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
 
     def test_refuses_different_filesystem(self):
         shm = "/dev/shm"
@@ -163,7 +179,7 @@ class RetireTests(unittest.TestCase):
             with self.assertRaises(Refused) as ctx:
                 retire(state, module)
             self.assertIn("different filesystems", str(ctx.exception))
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
             self.assertEqual(os.listdir(os.path.join(state, "retired")), [])
 
     def test_crash_before_rename_leaves_module_and_rolls_back(self):
@@ -171,14 +187,14 @@ class RetireTests(unittest.TestCase):
             _sw, _mods, state, _install, module, text = _tree(root)
             with self.assertRaises(InjectedCrash):
                 retire(state, module, faults=FaultInjector("retire.rename"), clock=Clock())
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
             journal = list_journals(state)[0]
             self.assertEqual(journal["state"], "retiring")
             with self.assertRaises(Refused):
                 retire(state, module)
             back = rollback(state, journal["run_id"])
             self.assertEqual(back.returncode, 0)
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
 
     def test_crash_after_rename_rolls_back(self):
         with tempfile.TemporaryDirectory() as root:
@@ -189,7 +205,7 @@ class RetireTests(unittest.TestCase):
             journal = list_journals(state)[0]
             self.assertEqual(journal["state"], "retiring")
             rollback(state, journal["run_id"])
-            self.assertEqual(open(module, encoding="utf-8").read(), text)
+            self.assertEqual(_read(module), text)
 
 
 class RetireGcTests(unittest.TestCase):
@@ -235,14 +251,14 @@ class RetireGcTests(unittest.TestCase):
             self.assertEqual(item["action"], "keep")
             self.assertIn("live module", item["reason"])
 
-    def test_generation_published_then_retired_is_removed_after_grace(self):
+    def test_swapped_publish_then_retire_keeps_live_tree_and_drops_hidden_sibling(self):
         with tempfile.TemporaryDirectory() as root:
             software = os.path.join(root, "software")
             modules = os.path.join(root, "modules")
             state = os.path.join(root, "state")
             os.makedirs(software)
             os.makedirs(modules)
-            classic_install(software, modules, "demo/1", "v0\n", "all/demo/1.lua")
+            live, _module_path, _text = classic_install(software, modules, "demo/1", "v0\n", "all/demo/1.lua")
             clock = Clock()
             builder = installpath_builder([{"rel": "demo/1", "payload": "v1\n", "module_rel": "all/demo/1.lua"}])
             spec = Spec(
@@ -250,6 +266,7 @@ class RetireGcTests(unittest.TestCase):
                 modules=modules,
                 state_root=state,
                 eb_args=["demo-1.eb"],
+                backend="installpath",
                 module_rels=["demo/1"],
                 builder=builder,
                 faults=FaultInjector(),
@@ -258,16 +275,23 @@ class RetireGcTests(unittest.TestCase):
                 clock=clock,
             )
             self.assertEqual(run(spec).returncode, 0)
-            generation = os.path.join(state, "generations", "run1")
+            hidden = os.path.join(os.path.dirname(live), ".1.run1")
             module = os.path.join(modules, "all", "demo", "1.lua")
+            self.assertEqual(_read(os.path.join(live, "PAYLOAD")), "v1\n")
+            self.assertTrue(os.path.isdir(hidden))
             retired = retire(state, module, clock=clock)
             retired_at = _journal(state, retired.run_id)["retired_at"]
             early = collect(state, GRACE, retired_at + 10)
             self.assertTrue(all(a["action"] == "keep" for a in early))
-            self.assertTrue(os.path.isdir(generation))
+            self.assertTrue(os.path.isdir(hidden))
+            self.assertTrue(os.path.isdir(live))
             late = collect(state, GRACE, retired_at + GRACE * 3600 + 1)
-            self.assertIn(generation, [a["path"] for a in late if a["action"] == "remove"])
-            self.assertFalse(os.path.exists(generation))
+            self.assertIn(hidden, [a["path"] for a in late if a["action"] == "remove"])
+            self.assertFalse(os.path.exists(hidden))
+            manual = [a for a in late if a["path"] == live][0]
+            self.assertEqual(manual["action"], "manual")
+            self.assertTrue(os.path.isdir(live))
+            self.assertEqual(_read(os.path.join(live, "PAYLOAD")), "v1\n")
             self.assertEqual(lstat_kind(module), "missing")
 
 

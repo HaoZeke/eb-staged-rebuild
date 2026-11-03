@@ -1,0 +1,65 @@
+#+title: Rebuild an EasyBuild install without exposing a partial tree
+
+* Probe the build host
+
+Run probes as the CI account and against the live software filesystem.
+
+#+begin_src sh
+eb-staged-rebuild probe --path "$EASYBUILD_INSTALLPATH_SOFTWARE"
+#+end_src
+
+Use an explicit =--backend bwrap= or =--backend userns= when site policy
+forbids the unsandboxed install-path fallback.
+
+* Preview the transaction
+
+#+begin_src sh
+eb-staged-rebuild run \
+  --software "$EASYBUILD_INSTALLPATH_SOFTWARE" \
+  --modules "$EASYBUILD_INSTALLPATH_MODULES" \
+  --module Name/version \
+  --dry-run \
+  -- Name-version-toolchain.eb --robot
+#+end_src
+
+Dry-run does not invoke EasyBuild or create a journal. Check the selected
+backend, the exchange result for this filesystem, and the staged command.
+
+* Run the rebuild
+
+Keep the state root on the software filesystem.
+
+#+begin_src sh
+eb-staged-rebuild run \
+  --software "$EASYBUILD_INSTALLPATH_SOFTWARE" \
+  --modules "$EASYBUILD_INSTALLPATH_MODULES" \
+  --state-root "$(dirname "$EASYBUILD_INSTALLPATH_SOFTWARE")/.eb-staged-rebuild" \
+  -- Name-version-toolchain.eb --robot
+#+end_src
+
+The stable =Name/version= path becomes the complete staged tree. The previous
+tree remains at =Name/.version.<run-id>=.
+
+* Recover or roll back
+
+#+begin_src sh
+eb-staged-rebuild status --state-root /path/to/.eb-staged-rebuild
+eb-staged-rebuild resume --state-root /path/to/.eb-staged-rebuild RUN_ID
+eb-staged-rebuild rollback --state-root /path/to/.eb-staged-rebuild RUN_ID
+#+end_src
+
+=resume= repairs an interrupted ordinary-rename fallback before continuing.
+=rollback= exchanges the previous tree back into the stable path.
+
+* Collect retired trees
+
+Choose the grace period from the site's longest job.
+
+#+begin_src sh
+eb-staged-rebuild gc \
+  --state-root /path/to/.eb-staged-rebuild \
+  --grace-hours 144 \
+  --dry-run
+#+end_src
+
+Review the exact hidden paths before running without =--dry-run=.
