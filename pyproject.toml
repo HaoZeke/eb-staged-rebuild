@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eb-staged-rebuild"
+version = "0.1.0"
+description = "Rebuild an EasyBuild install into a new generation and publish it by replacing the module file."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Rohit Goswami", email = "rgoswami@ieee.org"}]
+dependencies = []
+
+[project.scripts]
+eb-staged-rebuild = "eb_staged_rebuild.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["eb_staged_rebuild*"]
