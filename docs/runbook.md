@@ -1,79 +1,149 @@
 # Runbook
 
-Use this on a prefix where jobs are loading modules. Read [DESIGN.md](../DESIGN.md) for why the live directory is not renamed.
+Use this wrapper only for an existing real-directory install. New installs do
+not need an in-place rebuild and are refused.
 
-## Before the first rebuild
+## Preflight
 
-1. `eb-staged-rebuild probe --path <software-dir>`.
-   * `bwrap: usable` is required only for `--backend bwrap`. The default backend is `installpath` and does not run bubblewrap.
-   * `user.max_user_namespaces` is the host's sysctl. A value of 0 means the bwrap backend will refuse. This does not answer the site's STIG (`open-004`).
-   * `RENAME_EXCHANGE` is reported for the filesystem that holds `--path`. The publish step does not use it. `yes` on one ext4 disk is not a result for GPFS.
-   * `flock across nodes: unmeasured` is intentional. Two runs on one machine take the same lock. Two build nodes are `open-004`.
-2. `eb --show-config` and confirm `remove-ghost-install-dirs` is not true. This tool strips the command-line flag and the environment variable. One local run with a config file that set it true, and with a fresh module tree, left the old install in place. Do not treat that as a test of every configuration. A generation's `modules/` directory is removed before `eb` runs so a resumed build does not leave EasyBuild a module file that names the live directory.
-3. Pick `--grace-hours` from the longest job the site will run. The default 144 is the figure in the notes (120 hours plus a day). It is not a measured walltime. `gc` will not delete anything until that many hours after a later publish or a rollback. It never deletes `software/<name>/<version>`.
+Run the probe as the same account and on the same filesystem used by CI:
+
+```bash
+eb-staged-rebuild probe --path /shared/software
+```
+
+Interpret it locally:
+
+* `bwrap: usable` permits `--backend bwrap`.
+* `user-namespace sandbox: usable` means `unshare` created a user/mount
+  namespace and a test bind mount rejected writes with `EROFS`.
+* `RENAME_EXCHANGE: yes` applies only to the probed filesystem.
+* `flock across nodes: unmeasured` is deliberate. Test two actual build nodes.
+* Pin EasyBuild to the version shown by the probe; 5.4.2 is the tested target.
+
+Put `--state-root` beside the software tree so moving the completed stage to a
+hidden sibling cannot fail with `EXDEV`.
 
 ## Dry run
 
 ```bash
 eb-staged-rebuild run \
-  --software /software \
-  --modules /modules \
+  --software /shared/software \
+  --modules /shared/modules \
   --module Name/version \
   --dry-run \
-  -- file.eb --robot
+  -- Name-version-toolchain.eb --robot
 ```
 
-Dry-run prints the `eb` command and the probe summary. It does not create a run journal and it does not call `eb`. A symlink at `software/<name>/<version>` makes the dry-run exit 2 when `--module` names it. The bwrap backend also exits 2 when bubblewrap cannot create a namespace.
+Dry-run prints the selected sandbox and staged EasyBuild command. It does not
+invoke EasyBuild or create a journal. It refuses a missing or symlinked
+`Name/version` when `--module` names it.
+
+## Sandbox policy
+
+`--backend auto` tries bwrap, then the userns sandbox, then the install-path
+fallback. The fallback still stages away from the live prefix, but arbitrary
+hooks are not kernel-confined. Production policy should use an explicit
+`--backend bwrap` or `--backend userns` if that downgrade is unacceptable.
+Explicit sandbox backends refuse when their capability probe fails.
 
 ## Run
 
 ```bash
 eb-staged-rebuild run \
-  --software /software \
-  --modules /modules \
-  -- file.eb --robot
+  --software /shared/software \
+  --modules /shared/modules \
+  --backend auto \
+  -- Name-version-toolchain.eb --robot
 ```
 
-The arguments after `--` are passed to `eb`, except install-path, prefix, bwrap, and `--remove-ghost-install-dirs`. `--rebuild` is added when neither `--rebuild` nor `--force` is present.
+The lock is `<state-root>/.lock` and remains held through build and publish.
+The file remaining after a crash is not itself a held lock.
 
-`--backend bwrap` runs `eb --experimental --bwrap`. If the probe fails, the run stops. It does not rebuild in place. EasyBuild 5.3.0 and 5.3.1 omit `bwrap_installpath_software`; those two versions use `<bwrap-installpath>/software` and `<bwrap-installpath>/modules`, which is what their `bwrap.py` joins. Any other version that omits the key is left unpublished. An overlay upper (`--overlay` in `bwrap_cmd`) is not a complete tree and is not published.
+On success:
 
-The lock is `flock` on `<state-root>/.lock`, held from the start of the build until publish finishes. The lock file remaining after a crash is not a held lock. The pid in the file is a hint.
+* `/shared/software/Name/version` is the new complete directory;
+* `/shared/software/Name/.version.<run-id>` is the previous directory;
+* the module file still names `/shared/software/Name/version`; and
+* the journal records whether exchange or the ordinary-rename fallback ran.
 
-## Crash
+## Failure and resume
 
-`status` shows the journal state.
+```bash
+eb-staged-rebuild status --state-root /shared/.eb-staged-rebuild
+eb-staged-rebuild resume \
+  --state-root /shared/.eb-staged-rebuild \
+  RUN_ID
+```
 
-| State | What `resume` does |
-| --- | --- |
-| `created`, `building`, `failed` | Runs `eb` again into the same unpublished generation, then publishes. |
-| `built`, `publishing` | Publishes the module files that are not yet in place. Does not run `eb`. |
-| `complete` | Does nothing. |
-| `rolled_back` | Refuses. Start a new run. |
+Caught build, planning, swap, module, link, and journal failures leave every
+live directory at its original inode and contents. `resume` repeats incomplete
+work.
 
-A live module file is either the previous complete file or the new complete file. `resume` is safe to repeat. If it reports that the file matches neither, stop and do not delete directories by hand until the module file has been compared with `runs/<id>/backups/`.
+The ordinary-rename fallback has a hold name ending in `.fallback-old`. A
+`SIGKILL` or machine loss can stop between its renames. The next `resume`
+recognises either interrupted shape and restores the old live name first. Do
+not rename those paths by hand.
 
-`rollback` copies the backup back with the same same-directory replace, in reverse publish order. The generation directory stays. A module file this run created, and that still matches what was published, is removed. A symlink this run created at a class path is removed. An existing class symlink is left alone, because unlinking it would drop that name.
+If `RENAME_EXCHANGE` returned an errno other than `EINVAL`, `ENOSYS`, or
+`EOPNOTSUPP`, the operation stops without selecting the fallback. Diagnose the
+filesystem or permission error.
 
-## After it is published
+## Rollback
 
-`resolve` prints the directory the module file names and whether that directory looks complete (`PAYLOAD`, `easybuild/*.eb`, or the stamp this tool writes).
+```bash
+eb-staged-rebuild rollback \
+  --state-root /shared/.eb-staged-rebuild \
+  RUN_ID
+```
 
-`gc --dry-run` lists generations it would remove. A generation is removed only when all of these hold:
+Rollback swaps the hidden previous directory back into the stable path in
+reverse module order and restores module files. A caught rollback failure
+returns every completed operation to the published state, so retrying the same
+command is safe.
 
-* it is under `<state-root>/generations/`
-* no tracked module file resolves inside it
-* a later publish recorded the previous root, or the run was rolled back
-* the grace period has passed
+## Garbage collection
 
-`--include-failed` also removes failed runs that published nothing and are older than the grace period. Journals are kept.
+Set the grace from the site's longest possible job, not from this repository's
+default. The default is the notes' unverified 120 hours plus 24 hours.
 
-Do not `gc` a generation that a dependent's `DT_RPATH` or a user script still names. This tool does not search for those. The original `software/<name>/<version>` directory is not a generation under the state root, so `gc` will not remove it.
+```bash
+eb-staged-rebuild gc \
+  --state-root /shared/.eb-staged-rebuild \
+  --grace-hours 144 \
+  --dry-run
+```
 
-## Symlinks
+Review the paths, then omit `--dry-run`. Collection only accepts the exact
+hidden sibling recorded beside its stable live directory. It does not use
+node-local `lsof`, and it cannot prove that another node has no old file open.
+A software directory named by `retire` is reported, not deleted.
 
-If `software/<name>/<version>` is a symlink, the run stops before `eb`. The same is true of the module file that would be replaced. Class symlinks that already point at the real module file are left in place; the file they point at is what changes.
+## Retire a module published elsewhere
 
-## What still goes wrong
+When the same package is verified on a later `MODULEPATH` entry, move this
+tree's module file aside. The stable software directory stays where it is.
 
-A job that does not reload the module keeps the old generation until it ends. A binary that baked in the old path keeps it until that binary is rebuilt. Two nodes can still publish at once if `flock` does not span them. A crash while several modules are being published leaves a mixture of complete generations, not a half-written file; `resume` or `rollback` is how that mixture is closed.
+```bash
+eb-staged-rebuild retire \
+  --state-root /shared/.eb-staged-rebuild \
+  --module-file /shared/modules/all/Name/version.lua \
+  --reason "published on software.surf.nl"
+```
+
+`--lock-timeout` defaults to 0. `rollback` with the printed
+`retire-<timestamp>` id puts the module file back. The state root and the
+module tree must be the same filesystem.
+
+## Site gates (`open-004`)
+
+Before enabling the wrapper:
+
+1. probe bwrap as the CI account;
+2. record `user.max_user_namespaces` and the actual userns probe result;
+3. probe `RENAME_EXCHANGE` on the shared software filesystem;
+4. hold and contend for the same lock from two build nodes; and
+5. pin and integration-test one EasyBuild release, preferably 5.4.2 or newer.
+
+If exchange is unavailable and a transient missing name is unacceptable, do
+not use the ordinary-rename fallback. Change filesystem/deployment strategy or
+schedule a release freeze.
