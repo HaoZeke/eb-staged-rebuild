@@ -11,6 +11,8 @@
 * Make dry-run report sandbox and swap decisions without invoking EasyBuild.
 * Add exhaustive failure injection for build, journal, swap, module, link, and
   rollback paths.
+* Bump the journal schema to 2; version 1 generation-pointer runs are refused
+  instead of being interpreted as directory-swap transactions.
 * Name retention and kernel constants and record their sources.
 * Add Org-mode how-to, reference, baseline design audit, and `open-004`
   recommendations.

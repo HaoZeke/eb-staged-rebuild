@@ -18,6 +18,7 @@ from eb_staged_rebuild.atomicio import read_bytes
 from eb_staged_rebuild.constants import SECONDS_PER_HOUR
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
+from eb_staged_rebuild.lockfile import FileLock
 from eb_staged_rebuild.modulefile import parse_root
 from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
 from eb_staged_rebuild.retire import is_retire
@@ -134,7 +135,7 @@ def _retired_software(journals, roots, grace_hours, now):
     return actions
 
 
-def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
+def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
     state_root = abspath(state_root)
     journals = list_journals(state_root)
     actions = []
@@ -186,3 +187,26 @@ def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
             )
     actions.extend(_retired_software(journals, _live_roots(journals), grace_hours, now))
     return actions
+
+
+def collect(
+    state_root,
+    grace_hours,
+    now,
+    dry_run=False,
+    include_failed=False,
+    lock_timeout=None,
+):
+    """Collect retired trees while holding the same lock as publish/rollback."""
+    lock = FileLock(state_root)
+    lock.acquire(lock_timeout)
+    try:
+        return _collect_locked(
+            state_root,
+            grace_hours,
+            now,
+            dry_run,
+            include_failed,
+        )
+    finally:
+        lock.release()

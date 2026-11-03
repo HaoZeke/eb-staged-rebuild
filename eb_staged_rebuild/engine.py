@@ -27,6 +27,7 @@ from eb_staged_rebuild.constants import DEFAULT_GRACE_HOURS, RUN_ID_TIMESTAMP_FO
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 from eb_staged_rebuild.faults import FaultInjector
 from eb_staged_rebuild.journal import (
+    SCHEMA,
     generation_root as generation_root_for,
     journal_path,
     load_journal,
@@ -181,10 +182,10 @@ def _learn_rels(spec, faults, log):
     for rel in found:
         if rel not in rels:
             rels.append(rel)
-    if spec.backend == "bwrap" and not rels:
+    if not rels:
         raise Refused(
-            "bwrap backend needs --module Name/version or an eb --dry-run module line; "
-            "refusing to mount on an unknown path"
+            "run needs --module Name/version or an eb --dry-run module line; "
+            "refusing to build for an unknown live path"
         )
     return rels
 
@@ -728,7 +729,7 @@ def _run_locked(spec, faults, journal, fresh_build):
 def _blank_journal(spec, run_id, probes, rels):
     now = _clock(spec)()
     return {
-        "schema": 1,
+        "schema": SCHEMA,
         "run_id": run_id,
         "state": "created",
         "backend": spec.backend,

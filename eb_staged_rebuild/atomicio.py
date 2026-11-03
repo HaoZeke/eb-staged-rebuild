@@ -25,10 +25,6 @@ def file_mode(path):
 
 
 def atomic_write(path, data, faults, step, mode=None):
-    if faults is None:
-        from eb_staged_rebuild.faults import FaultInjector
-
-        faults = FaultInjector()
     """Write ``data`` to ``path`` by renaming a complete temporary file in the same directory.
 
     Fault points, each raised before the action:
@@ -41,6 +37,10 @@ def atomic_write(path, data, faults, step, mode=None):
     file in the same directory is the publish step; it does not unlink the
     destination first.
     """
+    if faults is None:
+        from eb_staged_rebuild.faults import FaultInjector
+
+        faults = FaultInjector()
     if isinstance(data, str):
         data = data.encode("utf-8")
     path = os.fspath(path)

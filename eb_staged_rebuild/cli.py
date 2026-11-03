@@ -101,6 +101,7 @@ def _parser():
     gc_p.add_argument("--state-root", required=True)
     gc_p.add_argument("--grace-hours", type=float, default=None)
     gc_p.add_argument("--dry-run", action="store_true")
+    gc_p.add_argument("--lock-timeout", type=float, default=None)
     gc_p.add_argument(
         "--include-failed",
         action="store_true",
@@ -195,6 +196,7 @@ def _dispatch(args):
             __import__("time").time(),
             dry_run=args.dry_run,
             include_failed=args.include_failed,
+            lock_timeout=args.lock_timeout,
         )
         for action in actions:
             print(f"{action['action']}: {action['path']} ({action['reason']})")

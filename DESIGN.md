@@ -76,9 +76,10 @@ observe a mixed set while a successful multi-module transaction is in flight.
 
 ## Lock, resume, rollback, and collection
 
-One `flock` on `<state-root>/.lock` covers build, publish, resume, rollback, and
-their journal changes. It serialises processes that observe the same lock
-implementation. Cross-node coherence remains an `open-004` measurement.
+One `flock` on `<state-root>/.lock` covers build, publish, resume, rollback,
+garbage collection, and their journal changes. It serialises processes that
+observe the same lock implementation. Cross-node coherence remains an
+`open-004` measurement.
 
 The journal records the stage, stable path, retired path, hashes, and completed
 steps. `resume` is idempotent. It first recovers an interrupted fallback and
