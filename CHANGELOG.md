@@ -2,11 +2,11 @@
 
 ## 0.3.0
 
-* Pair the local `flock` gate with a POSIX record lock on `.lock.posix`.
+* Pair the local flock lock with a POSIX record lock on `.lock.posix`.
   Cross-node coherence is still unmeasured. A 0.2.0 flock-only process does
   not take the sidecar.
-* Preserve ownership, mode, and listed ACL bytes when a module file is
-  replaced, and refuse a stale privileged temporary file.
+* Preserve ownership, mode, and the listed access control list bytes when a
+  module file is replaced, and refuse a stale privileged temporary file.
 * Drain a build's process group before the writer lock is released.
 * Refuse garbage collection when a tracked module cannot be read, and keep a
   hidden sibling that a module reaches through a symlink. Removal stays on
@@ -15,7 +15,8 @@
   record's `location` is the stable install directory. The journal schema is
   4 when a ledger policy is frozen, and schema 2 otherwise. Schema 1 and
   schema 3 generation-pointer journals are refused.
-* No git tag is created for this version.
+* No git tag is created for this version. Recorded checks use ext4. Cross-node
+  locking and General Parallel File System remain `open-004`.
 
 ## 0.2.0
 

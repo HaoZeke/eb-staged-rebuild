@@ -2,12 +2,12 @@
 
 EasyBuild `--rebuild` and `--force` empty an existing install before the new
 install has passed its sanity checks. This program never points EasyBuild at
-the live install for a staged build. It builds a complete replacement, takes
-one `flock` for the build and publish transaction, and then swaps the staged
-directory with `software/<name>/<version>`.
+the live install for a staged build. The program writes a complete replacement
+in a separate tree, takes one `flock` for the build and publish transaction,
+and then swaps the staged directory with `software/<name>/<version>`.
 
 The stable path remains a real directory. A successful rebuild changes the
-directory inode and contents at that path; the retired directory is kept as
+inode and the file bytes at that path. The retired directory is kept as
 `software/<name>/.<version>.<run-id>` for rollback and for running processes
 that still hold old files open.
 
@@ -18,17 +18,19 @@ that still hold old files open.
 1. EasyBuild's experimental bubblewrap backend, after
    `bwrap --dev-bind / / true` succeeds.
 2. `unshare` with a user and mount namespace. The helper bind-mounts the live
-   software and module trees read-only, verifies that the probe mount rejects a
-   write with `EROFS`, and runs an install-path build into the stage.
-3. The install-path fallback. It still sends EasyBuild to a separate software
-   and module tree, but it has no kernel sandbox. The command prints this
-   downgrade. Sites that require sandboxing should select `--backend bwrap` or
-   `--backend userns`; either explicit backend refuses instead of downgrading.
+   software tree and the live module tree read-only. The helper then checks
+   that a probe write fails with `EROFS`. The build runs into the stage with
+   an install path.
+3. The install-path fallback. The fallback still sends EasyBuild to a separate
+   software tree and a separate module tree. The fallback has no kernel
+   sandbox. The command prints that the run is using this unsandboxed
+   fallback. Sites that require sandboxing should select `--backend bwrap` or
+   `--backend userns`. Either explicit backend refuses when its probe fails.
 
 The fallback exists for hosts where bubblewrap is absent and unprivileged user
-namespaces are disabled. It protects against EasyBuild's normal cleanup paths,
-not against a hook that deliberately writes outside its configured install
-path.
+namespaces are disabled. The fallback blocks EasyBuild's normal cleanup of the
+live tree. A hook that writes outside its configured install path is outside
+that protection.
 
 EasyBuild options that could redirect the build are removed:
 `--prefix`, `--installpath*`, `--subdir-*`, `--bwrap*`, and
@@ -55,47 +57,51 @@ fallback:
 2. rename staged to live;
 3. rename the hold path to staged.
 
-Every caught error or injected failure restores the original two names before
-it is re-raised. If a process or machine dies between fallback renames, the
-journal and the hold-name state let `resume` restore the old live name before
-trying again. This recovery cannot make the fallback's transient missing-name
-window atomic; only `RENAME_EXCHANGE` can do that. A deployment that requires
-an uninterrupted name must require a filesystem where the exchange probe
-succeeds.
+Every caught error restores the original two names, and so does every injected
+failure. The error is then raised again. If a process or machine dies between
+fallback renames, `resume` reads the journal and the hold name. `resume`
+restores the old live name before the next attempt. That recovery does not
+make the missing-name window atomic. Only `RENAME_EXCHANGE` does that. A
+deployment that requires an uninterrupted name needs a filesystem where the
+exchange probe succeeds.
 
 For a multi-module build, all directory swaps happen before module files are
 published. If any swap, module write, class-link operation, or journal write
 fails, every completed module-file update and directory swap is reversed.
-Tests inject a failure before every recorded operation and verify that every
-live directory has its original inode and bytes afterwards.
+Tests inject a failure before every recorded operation. After each failure,
+every live directory still has its original inode and its original bytes.
 
 The module-file replacement is a same-directory `os.replace` after file and
-directory `fsync`. The directory swap is still not one atomic operation across
-several modules. Other users do not take this tool's advisory lock, so they can
-observe a mixed set while a successful multi-module transaction is in flight.
+directory `fsync`. The directory swap is atomic for one directory. A build
+with more than one module is not one atomic operation. Other users do not
+take this tool's advisory lock. Those users can observe a mixed set while a
+successful multi-module transaction is in flight.
 
 ## Lock, resume, rollback, and collection
 
-A local `flock` on `<state-root>/.lock` is taken first, and then a POSIX
-record lock on the distinct sidecar `<state-root>/.lock.posix`. The gate
+A local flock lock on `<state-root>/.lock` is taken first. A POSIX record
+lock is then taken on the sidecar `<state-root>/.lock.posix`. The flock lock
 excludes threads and processes that share a kernel. The sidecar excludes
 other nodes only when the filesystem provides coherent POSIX locks. The
-sidecar is opened only while the gate is held and closed before the gate is
-released. Other code in the same process must not open the sidecar: closing
-any descriptor for that inode drops the process's record locks. Forked
-children close inherited descriptors without unlocking the parent. Never
-unlink either file while the state root is active.
+sidecar is opened only while the flock lock is held. The sidecar is closed
+before the flock lock is released. Other code in the same process must not
+open the sidecar. Closing any descriptor for that inode drops the process's
+record locks. A forked child closes inherited descriptors. The child does
+not release the parent's locks. Never unlink either file while the state
+root is active.
 
-Every node must use this protocol. A flock-only publisher (0.2.0) still
-excludes this process on the same kernel, and it does not take the sidecar,
-so the two versions do not exclude each other across nodes. Drain flock-only
-holders before relying on cross-node exclusion. Cross-node coherence and
-failed-node recovery remain an `open-004` measurement; this repository has
-not measured GPFS.
+Every node must use this protocol. A flock-only publisher from version 0.2.0
+still excludes this process on the same kernel. That publisher does not take
+the sidecar. The two versions do not exclude each other across nodes. Drain
+flock-only holders before relying on cross-node exclusion. Cross-node
+coherence remains an `open-004` measurement. Recovery after a failed node
+remains an `open-004` measurement. This repository has not measured General
+Parallel File System. The ext4 tests are not acceptance of that filesystem.
 
-The journal records the stage, stable path, retired path, hashes, and completed
-steps. `resume` is idempotent. It first recovers an interrupted fallback and
-normalises any interrupted publish to the old tree.
+The journal records the stage, the stable path, the retired path, the hashes,
+and the completed steps. `resume` is idempotent. `resume` first recovers an
+interrupted fallback. `resume` then returns any interrupted publish to the
+old tree.
 
 `rollback` exchanges each retired directory back into the stable path in
 reverse order and restores module files. A failed rollback reverses its own
@@ -119,25 +125,27 @@ write a module file.
   (`ns-054`).
 * A process killed with `SIGKILL` during the ordinary-rename fallback cannot
   execute in-process rollback. The next `resume` repairs the journaled state.
-* The dual lock's coherence across two build nodes is not assumed. GPFS was
-  not measured.
+* This repository has not measured the dual lock from two build nodes. General
+  Parallel File System was not measured. The candidate scope is ext4 until a
+  site accepts the shared filesystem.
 * A module-file replacement keeps the destination's ownership, mode, and
-  listed ACL bytes (POSIX access, generic NFSv4, GPFS native NFSv4) when
-  those attributes can be read back unchanged. A filesystem that was not
-  measured here, including GPFS, is not claimed to preserve them.
-* Optional `--ledger-config` appends eb-stack ledger records whose `location`
-  is the stable directory. The journal schema for that run is 4. Schema 1 and
-  schema 3 are generation-pointer journals and are refused. Schema 2 remains
-  a directory swap without a ledger.
+  listed access control list bytes. The known names are the POSIX access
+  list, the generic Network File System version 4 list, and the native
+  General Parallel File System list. The bytes must read back unchanged.
+  This repository does not claim that an unmeasured filesystem preserves them.
+* Optional `--ledger-config` appends eb-stack ledger records. The record
+  `location` is the stable directory. The journal schema for that run is 4.
+  Schema 1 and schema 3 are generation-pointer journals and are refused.
+  Schema 2 remains a directory swap without a ledger.
 * The unsandboxed fallback cannot constrain arbitrary EasyBuild hooks.
 * Neither `gc` nor the grace period can see open files on every cluster node.
-* A successful transaction is atomic per directory, not across several module
-  directories.
+* A successful transaction is atomic for one directory. A transaction that
+  covers more than one module directory is not one atomic operation.
 
 ## Retiring a copy that moved elsewhere
 
 A package can be installed in this tree and later published somewhere that sits
-further along `MODULEPATH`, such as a CVMFS repository. Once that copy is
+further along `MODULEPATH`, such as a CernVM File System repository. Once that copy is
 verified, this tree's module file must stop being what users load, and running
 jobs must keep their software directory.
 
@@ -217,7 +225,7 @@ one is closed in this tree, or kept on purpose.
 2. Closed. The live-change record includes a SHA-256 of each file's contents.
 3. Closed. `--skip-live-check` is documented. It skips that record.
 4. Closed. A `--module` value or a parsed module path that leaves the software or module root is refused.
-5. Closed. Symlink components of a module path are refused even when the file itself is still missing.
+5. Closed. Symlink components of a module path are refused. The refusal still applies when the module file is missing.
 6. Closed. Stage roots taken from `bwrap_info.json` must stay inside the run's generation directory.
 7. Closed. A missing `Name/version` is refused before EasyBuild. The build does not create the live directory.
 8. Closed. The temporary file for an atomic write is created with `mkstemp`, so the name is not a fixed hard-link target.
@@ -226,12 +234,12 @@ one is closed in this tree, or kept on purpose.
 11. Closed. The unit suite passes with `ResourceWarning` promoted to an error.
 12. Intended. The module preflight can run before a software-symlink refusal. The install build does not. A module-file symlink is refused in planning, after the build and before any swap, because the path may be known only from that preflight.
 13. Intended. Bubblewrap is accepted when `bwrap --dev-bind / / true` succeeds. `user.max_user_namespaces` is reported. A zero value does not by itself refuse a setuid bubblewrap that passes the probe.
-14. Closed. The runbook states that the preflight runs before the lock and that EasyBuild may run twice. The lock covers build, publish, resume, rollback, retire, and garbage collection.
+14. Closed. The runbook states that the preflight runs before the lock. The runbook also states that EasyBuild may run twice. The lock covers build, publish, resume, rollback, retire, and garbage collection.
 15. Intended. Dry-run checks the software directory named by `--module`. It does not check the live module file. That file is checked when a real run plans the publish.
 16. Closed. `--run-id`, `--lock-timeout`, `--skip-live-check`, `--eb`, `EB_STAGED_REBUILD_EB`, `EB_STAGED_REBUILD_STATE_ROOT`, and `EB_STAGED_REBUILD_GRACE_HOURS` are documented.
-17. Closed for the collector: `gc` holds the state-root lock. Intended for the rest: two state roots are two locks, even when both runs name the same live trees. One state root per live tree is the deployment rule.
+17. Closed for the collector: `gc` keeps the state-root lock until collection finishes. Intended for the rest: two state roots are two locks, even when both runs name the same live trees. One state root per live tree is the deployment rule.
 18. Closed. The explanation of `atomic_write` is its docstring.
 19. Intended. One unreadable journal makes `status` stop. A partial list would hide the broken run.
 20. Intended. A crash during planning can leave prepared module files while the journal still says `building`. `resume` from `building` rebuilds that generation.
-21. Intended. `resolve` calls a directory complete when it contains install metadata, including the stamp written before publish. That means the tree is complete, not that it is already the live path.
+21. Intended. `resolve` calls a directory complete when it contains install metadata, including the run marker written before publish. The marker means the tree is complete. The marker does not mean the tree is already the live path.
 22. Closed. With integration enabled, missing `eb` or Lmod fails the test. The bubblewrap case skips when that probe fails, and the README says so.

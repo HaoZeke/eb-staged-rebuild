@@ -9,7 +9,7 @@ fallback. Publish uses `renameat2(RENAME_EXCHANGE)` when the target filesystem
 supports it. The ordinary-rename fallback restores the old live name after
 every caught failure.
 
-Author: Rohit Goswami &lt;rgoswami@ieee.org&gt;. License: MIT.
+Author: Rohit Goswami &lt;rgoswami@ieee.org&gt;. License: the Massachusetts Institute of Technology license.
 
 ## Install
 
@@ -45,9 +45,11 @@ the documented fallback is acceptable.
 `--eb` selects the EasyBuild executable (environment `EB_STAGED_REBUILD_EB`,
 default `eb`). `--run-id` names the journal instead of the generated id.
 `--lock-timeout` is how long to wait for `<state-root>/.lock` and its POSIX
-record-lock sidecar `<state-root>/.lock.posix`, in seconds; omitted, the wait
-has no deadline, and `retire` defaults to 0. A 0.2.0 flock-only process does
-not take the sidecar. `--prepare` names an executable that receives a
+record-lock sidecar `<state-root>/.lock.posix`, in seconds. Omit it and the
+wait has no deadline. `retire` defaults to 0. A 0.2.0 process takes only the
+local flock lock. That process does not take the sidecar.
+
+`--prepare` names an executable that receives a
 directory-swap context JSON before the live directory is exchanged.
 `--ledger-config` names a JSON eb-stack ledger configuration; `started`
 records are acknowledged before the swap, and the stable
@@ -76,7 +78,7 @@ sibling after the grace period; it never deletes the stable live path. The
 default grace is 144 hours, the notes' unverified 120 hours plus a day.
 
 When a package installed here is later published elsewhere on `MODULEPATH`
-(for example a CVMFS repository), `retire` moves its module file out of the
+(for example a CernVM File System repository), `retire` moves its module file out of the
 module tree, so users load the other copy, without touching
 `software/<name>/<version>`:
 

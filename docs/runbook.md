@@ -17,10 +17,14 @@ Interpret it locally:
 * `user-namespace sandbox: usable` means `unshare` created a user/mount
   namespace and a test bind mount rejected writes with `EROFS`.
 * `RENAME_EXCHANGE: yes` applies only to the probed filesystem.
-* `lock: flock gate plus POSIX record lock; cross-node coherence unmeasured (open-004)`
-  is deliberate. The sidecar is `<state-root>/.lock.posix`. Test two actual
-  build nodes with this protocol. A flock-only 0.2.0 publisher does not
-  participate in the sidecar. Do not unlink either lock file.
+* The probe prints the lock line below. Cross-node coherence stays `open-004`
+  until two build nodes are measured. The sidecar is `<state-root>/.lock.posix`.
+  A flock-only 0.2.0 publisher does not take the sidecar. Do not unlink either
+  lock file.
+
+```text
+lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)
+```
 * Pin EasyBuild to the version shown by the probe; 5.4.2 is the tested target.
 
 Put `--state-root` beside the software tree so moving the completed stage to a
@@ -84,10 +88,10 @@ Caught build, planning, swap, module, link, and journal failures leave every
 live directory at its original inode and contents. `resume` repeats incomplete
 work.
 
-The ordinary-rename fallback has a hold name ending in `.fallback-old`. A
-`SIGKILL` or machine loss can stop between its renames. The next `resume`
-recognises either interrupted shape and restores the old live name first. Do
-not rename those paths by hand.
+The ordinary-rename fallback can be interrupted. Its hold name ends in
+`.fallback-old`. A `SIGKILL` or a machine loss can stop between the renames.
+The next `resume` recognises either interrupted shape. `resume` restores the
+old live name first. Leave those paths for `resume`.
 
 If `RENAME_EXCHANGE` returned an errno other than `EINVAL`, `ENOSYS`, or
 `EOPNOTSUPP`, the operation stops without selecting the fallback. Diagnose the
@@ -108,8 +112,8 @@ command is safe.
 
 ## Garbage collection
 
-Set the grace from the site's longest possible job, not from this repository's
-default. The default is the notes' unverified 120 hours plus 24 hours.
+Set the grace from the site's longest job. The repository default is the
+notes' unverified 120 hours plus 24 hours.
 
 ```bash
 eb-staged-rebuild gc \
@@ -118,10 +122,12 @@ eb-staged-rebuild gc \
   --dry-run
 ```
 
-Review the paths, then omit `--dry-run`. Collection only accepts the exact
-hidden sibling recorded beside its stable live directory. It does not use
-node-local `lsof`, and it cannot prove that another node has no old file open.
-A software directory named by `retire` is reported, not deleted.
+Read the listed paths. Run the same command again without `--dry-run` when
+the list is the set you intend to remove. Collection accepts only the exact
+hidden sibling recorded beside its stable live directory. Collection does not
+use node-local `lsof`. Collection cannot see an old file that is open on
+another node. A software directory named by `retire` is reported. Collection
+leaves that directory in place.
 
 ## Retire a module published elsewhere
 
@@ -145,14 +151,32 @@ module tree must be the same filesystem.
 lists the subcommands `probe`, `run`, `resume`, `rollback`, `gc`, `retire`,
 `status`, and `resolve`.
 
-`probe --path DIR --eb EB --json` reports bubblewrap, the user-namespace
-sandbox, `RENAME_EXCHANGE`, and EasyBuild. `--eb` is the EasyBuild executable.
-The environment variable `EB_STAGED_REBUILD_EB` is the default (`eb` when
-unset). `--json` prints the same report as one JSON object.
+```bash
+eb-staged-rebuild probe --path /shared/software --eb eb --json
+```
 
-`run` accepts `--software`, `--modules`, `--state-root`, `--eb`, `--backend`,
-`--grace-hours`, `--dry-run`, `--module`, `--run-id`, `--lock-timeout`, and
-`--skip-live-check`, then the easyconfig after `--`.
+`probe` reports bubblewrap, the user-namespace sandbox, `RENAME_EXCHANGE`, and
+EasyBuild. `--eb` is the EasyBuild executable. The environment variable
+`EB_STAGED_REBUILD_EB` is the default (`eb` when unset). `--json` prints the
+same report as one JSON object.
+
+```bash
+eb-staged-rebuild run \
+  --software /shared/software \
+  --modules /shared/modules \
+  --state-root /shared/.eb-staged-rebuild \
+  --eb eb \
+  --backend auto \
+  --grace-hours 144 \
+  --dry-run \
+  --module Name/version \
+  --run-id RUNID \
+  --lock-timeout 30 \
+  --skip-live-check \
+  -- Name-version-toolchain.eb
+```
+
+`run` accepts those options, then the easyconfig after `--`.
 
 * `--software` and `--modules` default to `EASYBUILD_INSTALLPATH_SOFTWARE` and
   `EASYBUILD_INSTALLPATH_MODULES`.
@@ -160,38 +184,77 @@ unset). `--json` prints the same report as one JSON object.
   sibling of the software tree named `.eb-staged-rebuild`.
 * `--backend` is `auto`, `bwrap`, `userns`, or `installpath`.
 * `--grace-hours` defaults to `EB_STAGED_REBUILD_GRACE_HOURS`, or else 144.
-* `--run-id` forces the journal id. The default is a UTC stamp plus the pid.
-* `--lock-timeout SECONDS` waits that long for the state-root lock and then
-  refuses. Omit it and the wait has no deadline.
-* `--module NAME/VERSION` checks that live directory before the build. Repeat
-  it for each known install.
+* `--run-id` forces the journal id. The default joins a Coordinated Universal
+  Time value with the process id.
+* `--lock-timeout` takes a number of seconds. The command waits that long for
+  the state-root lock and then refuses. Omit the option and the wait has no
+  deadline.
+* `--module` names one `Name/version` directory to check before the build.
+  Repeat the option for each known install.
 * `--skip-live-check` does not record file contents before the build and does
   not refuse when those contents change before publish.
 
-`resume --state-root DIR --lock-timeout SECONDS RUN_ID` continues one journal.
-A retire record is refused; use `rollback` for that id.
+```bash
+eb-staged-rebuild resume \
+  --state-root /shared/.eb-staged-rebuild \
+  --lock-timeout 30 \
+  RUNID
+```
 
-`rollback --state-root DIR --lock-timeout SECONDS RUN_ID` swaps a published
-tree back, or puts a retired module file back.
+`resume` continues one journal. A retire record is refused. Use `rollback` for
+that id.
 
-`gc --state-root DIR --grace-hours HOURS --lock-timeout SECONDS --dry-run
---include-failed` removes a hidden sibling once the grace period has passed.
+```bash
+eb-staged-rebuild rollback \
+  --state-root /shared/.eb-staged-rebuild \
+  --lock-timeout 30 \
+  RUNID
+```
+
+`rollback` swaps a published tree back, or puts a retired module file back.
+
+```bash
+eb-staged-rebuild gc \
+  --state-root /shared/.eb-staged-rebuild \
+  --grace-hours 144 \
+  --lock-timeout 30 \
+  --dry-run \
+  --include-failed
+```
+
+`gc` removes a hidden sibling once the grace period has passed.
 `--include-failed` also removes the hidden sibling recorded for a failed run
-whose modules are still pending, once the grace period has passed. It does not
-delete the stable software directory named by `retire`.
+whose modules are still pending, once the grace period has passed. `gc` leaves
+the stable software directory named by `retire` in place.
 
-`retire --state-root DIR --module-file PATH --reason TEXT --dry-run
---lock-timeout SECONDS` moves one module file aside. `--lock-timeout` defaults
-to 0.
+```bash
+eb-staged-rebuild retire \
+  --state-root /shared/.eb-staged-rebuild \
+  --module-file /shared/modules/all/Name/version.lua \
+  --reason "published on software.surf.nl" \
+  --dry-run \
+  --lock-timeout 0
+```
 
-`status --state-root DIR [RUN_ID]` prints journals. A retire journal includes
-the software directory it left in place.
+`retire` moves one module file aside. `--lock-timeout` defaults to 0.
 
-`resolve MODULE` prints JSON for one module file: its syntax, the install path
-it names, and whether that directory looks complete. The exit status is 1 when
+```bash
+eb-staged-rebuild status --state-root /shared/.eb-staged-rebuild
+eb-staged-rebuild status --state-root /shared/.eb-staged-rebuild RUNID
+```
+
+`status` prints journals. A retire journal includes the software directory it
+left in place.
+
+```bash
+eb-staged-rebuild resolve /shared/modules/all/Name/version.lua
+```
+
+`resolve` prints JSON for one module file: its syntax, the install path it
+names, and whether that directory looks complete. The exit status is 1 when
 the path is not a complete install.
 
-## Site gates (`open-004`)
+## Measurements still open (`open-004`)
 
 Before enabling the wrapper:
 

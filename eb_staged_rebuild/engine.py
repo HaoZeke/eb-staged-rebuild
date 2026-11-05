@@ -1215,7 +1215,7 @@ def _dry_run(spec, probes, faults):
         + ": "
         + ("yes" if exchange.get("ok") else "no"),
         "easybuild: " + (easybuild.get("version_text") or easybuild.get("reason") or "not found"),
-        "lock: flock gate plus POSIX record lock; cross-node coherence unmeasured (open-004)",
+        "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)",
         "publish: renameat2(RENAME_EXCHANGE), with a restoring ordinary-rename fallback",
     ]
     problems = []
