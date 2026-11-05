@@ -121,7 +121,9 @@ def _restore_metadata(fd, metadata, mode):
     os.fchown(fd, metadata.info.st_uid, metadata.info.st_gid)
     os.fchmod(fd, mode)
     primary = next((name for name in ACL_ATTRIBUTES if name in metadata.acls), None)
-    if primary is not None:
+    # A mode-derived virtual ACL can already match the required policy.
+    # Writing it can materialize an additional native ACL on GPFS.
+    if primary is not None and read_acls(fd) != metadata.acls:
         os.setxattr(fd, primary, metadata.acls[primary])
     restored = os.fstat(fd)
     if (restored.st_uid, restored.st_gid, stat.S_IMODE(restored.st_mode)) != (
