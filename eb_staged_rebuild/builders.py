@@ -2,9 +2,13 @@
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 
+from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.probe import USER_NAMESPACE_FLAGS
 
 # Options that would send the build at the live tree, or that delete a previous
@@ -139,10 +143,85 @@ def dry_run_command(ctx):
     return cmd, env
 
 
+def _signal_group(child, signum):
+    try:
+        os.killpg(child.pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _group_running(pgid):
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[2]) == pgid and fields[0] not in (b"Z", b"X"):
+            return True
+    return False
+
+
+def _kill_group(child):
+    """SIGKILL is delivered asynchronously; a member keeps its descriptors until it exits."""
+    _signal_group(child, signal.SIGKILL)
+    while _group_running(child.pid):
+        time.sleep(0.01)
+
+
 def run_command(cmd, env, faults, step):
+    """Keep the caller's lock held until the command process group has stopped.
+
+    Catchable termination signals request group shutdown. The group leader
+    remains unreaped until the last group signal, so its identifier cannot be
+    reassigned to an unrelated process. Commands must keep their workers in
+    their process group and join them before returning.
+    """
     faults.reach(step)
-    completed = subprocess.run(cmd, env=env, check=False)
-    return completed.returncode
+    if threading.current_thread() is not threading.main_thread():
+        raise Refused("external build and preparation commands require the main thread")
+    if not os.path.isfile("/proc/self/stat"):
+        raise Refused("external commands require /proc to confirm their process group stopped")
+    interrupted = [None]
+
+    def request_stop(signum, frame):
+        if interrupted[0] is None:
+            interrupted[0] = signum
+
+    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    handlers = {signum: signal.getsignal(signum) for signum in signals}
+    child = None
+    try:
+        for signum in signals:
+            signal.signal(signum, request_stop)
+        child = subprocess.Popen(cmd, env=env, start_new_session=True)
+        while interrupted[0] is None:
+            exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if exited is not None:
+                break
+            time.sleep(0.02)
+        if interrupted[0] is not None:
+            _signal_group(child, signal.SIGTERM)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+        # The unreaped leader reserves the process-group identifier. Stray
+        # workers must not retain write access beyond command completion.
+        _kill_group(child)
+        code = child.wait()
+        if interrupted[0] is not None:
+            return 128 + interrupted[0]
+        return code if code >= 0 else 128 - code
+    finally:
+        try:
+            if child is not None and child.returncode is None:
+                _kill_group(child)
+                child.wait()
+        finally:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
 
 
 def format_command(cmd):
