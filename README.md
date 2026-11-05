@@ -51,7 +51,12 @@ unchanged. The finalizer runs outside the EasyBuild sandbox. It must be
 idempotent because a crash can require repeating it. Its path and result
 are retained in the run journal; resume runs an unfinished finalizer before
 publication. A completed finalizer is not repeated while resuming module
-publication.
+publication. A finalizer failure retains the built generation, so retrying
+does not repeat EasyBuild. An empty finalizer argument is refused. A child
+terminated by a signal returns the corresponding shell exit status.
+
+Journals use schema 2 so a reader that lacks preparation support refuses
+them. Schema 1 remains readable, and each journal write upgrades its schema.
 
 After a crash:
 

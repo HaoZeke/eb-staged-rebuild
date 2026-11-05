@@ -117,7 +117,7 @@ def dry_run_command(ctx):
 def run_command(cmd, env, faults, step):
     faults.reach(step)
     completed = subprocess.run(cmd, env=env, check=False)
-    return completed.returncode
+    return completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
 
 
 def format_command(cmd):

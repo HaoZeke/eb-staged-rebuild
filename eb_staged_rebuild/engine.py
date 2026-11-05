@@ -105,7 +105,9 @@ class _Ctx:
 
 
 def _check_roots(spec):
-    if spec.prepare_executable and not os.path.isabs(spec.prepare_executable):
+    if spec.prepare_executable is not None and not spec.prepare_executable:
+        raise Refused("publication preparation executable must not be empty")
+    if spec.prepare_executable is not None and not os.path.isabs(spec.prepare_executable):
         raise Refused("publication preparation executable must be an absolute path")
     if not is_real_dir(spec.software):
         kind = lstat_kind(spec.software)
@@ -492,6 +494,15 @@ def _command_text(journal):
     return format_command(cmd)
 
 
+def _preparation_failure(spec, journal, faults, message, code):
+    journal["message"] = message
+    journal["prepare_returncode"] = code
+    journal["updated_at"] = _clock(spec)()
+    save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepare_failed")
+    _log(message)
+    return code
+
+
 def _prepare_publication(spec, journal, faults):
     if not spec.prepare_executable or journal.get("prepare_complete"):
         return 0
@@ -512,10 +523,10 @@ def _prepare_publication(spec, journal, faults):
     try:
         rc = run_command(command, os.environ.copy(), faults, "prepare.invoke")
     except OSError as exc:
-        return _fail(spec, journal, faults, f"publication preparation failed: {exc}", 2).returncode
+        return _preparation_failure(spec, journal, faults, f"publication preparation failed: {exc}", 2)
     journal["prepare_returncode"] = rc
     if rc != 0:
-        return _fail(spec, journal, faults, f"publication preparation exited {rc}; live modules were not changed", rc).returncode
+        return _preparation_failure(spec, journal, faults, f"publication preparation exited {rc}; live modules were not changed", rc)
     journal["prepare_complete"] = True
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepared")
     return 0
@@ -550,7 +561,7 @@ def _run_locked(spec, faults, journal, fresh_build):
 def _blank_journal(spec, run_id, probes, rels):
     now = _clock(spec)()
     return {
-        "schema": 1,
+        "schema": 2,
         "run_id": run_id,
         "state": "created",
         "backend": spec.backend,

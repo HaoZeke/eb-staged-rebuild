@@ -149,6 +149,8 @@ def _dispatch(args):
             return 1
         return 0
     if args.command == "run":
+        if args.prepare is not None and not args.prepare:
+            raise Refused("publication preparation executable must not be empty")
         software = _software(args.software)
         modules = _modules(args.modules)
         if not software or not modules:

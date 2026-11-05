@@ -6,7 +6,7 @@ import os
 from eb_staged_rebuild.atomicio import atomic_write, read_bytes
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 
-SCHEMA = 1
+SCHEMA = 2
 
 
 def journal_path(state_root, run_id):
@@ -34,8 +34,8 @@ def load_journal(path):
         data = json.loads(read_bytes(path).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise NeedsIntervention(f"journal cannot be read: {path}: {exc}") from exc
-    if data.get("schema") != SCHEMA:
-        raise NeedsIntervention(f"journal schema {data.get('schema')!r} is not {SCHEMA}")
+    if data.get("schema") not in (1, SCHEMA):
+        raise NeedsIntervention(f"journal schema {data.get('schema')!r} is not supported (1 or {SCHEMA})")
     return data
 
 
