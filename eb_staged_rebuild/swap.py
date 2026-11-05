@@ -153,10 +153,11 @@ def swap_directories(
     tree after a successful call.  Unsupported rename flags select the ordinary
     rename fallback.  Any other exchange error leaves both names unchanged.
     """
-    live, staged = _validate_pair(live, staged)
+    live, staged = abspath(live), abspath(staged)
     faults = faults if faults is not None else FaultInjector()
     exchange_call = exchange_call or _rename_exchange
     recover_interrupted_swap(live, staged, rename)
+    live, staged = _validate_pair(live, staged)
     if allow_exchange:
         exchanged = False
         try:

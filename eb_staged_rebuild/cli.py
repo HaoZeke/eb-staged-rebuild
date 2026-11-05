@@ -85,6 +85,14 @@ def _parser():
     run_p.add_argument("--run-id", default=None)
     run_p.add_argument("--lock-timeout", type=float, default=None)
     run_p.add_argument("--skip-live-check", action="store_true")
+    run_p.add_argument(
+        "--prepare",
+        help="executable called with a directory-swap context JSON before the live directory is exchanged",
+    )
+    run_p.add_argument(
+        "--ledger-config",
+        help="JSON eb-stack ledger configuration; started records precede the directory swap",
+    )
     run_p.add_argument("eb_args", nargs=argparse.REMAINDER, help="easyconfig and eb options, after --")
 
     resume_p = sub.add_parser("resume", help="continue a run after a crash")
@@ -183,6 +191,8 @@ def _dispatch(args):
             run_id=args.run_id,
             skip_live_check=args.skip_live_check,
             lock_timeout=args.lock_timeout,
+            prepare_executable=args.prepare,
+            ledger_config=args.ledger_config,
         )
         result = run(spec)
         return result.returncode
@@ -278,7 +288,7 @@ def _print_probe(report):
     else:
         print(f"EasyBuild: {easybuild.get('reason')}")
     print(f"filesystem: {filesystem.get('fstype')} {filesystem.get('mount') or ''}".rstrip())
-    print("flock across nodes: unmeasured (open-004)")
+    print("lock: flock gate plus POSIX record lock; cross-node coherence unmeasured (open-004)")
 
 
 if __name__ == "__main__":

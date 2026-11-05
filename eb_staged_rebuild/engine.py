@@ -7,7 +7,15 @@ import shutil
 import time
 from dataclasses import dataclass, field
 
-from eb_staged_rebuild.atomicio import atomic_write, fsync_dir, read_bytes, sha256_bytes
+from eb_staged_rebuild.atomicio import (
+    atomic_write,
+    fsync_dir,
+    read_bytes,
+    read_metadata,
+    sha256_bytes,
+)
+from eb_staged_rebuild import outbox
+from eb_staged_rebuild.ledger_adapter import EbStackLedger, load_config, publication_records
 from eb_staged_rebuild.builders import (
     bwrap_command,
     dry_run_command,
@@ -70,6 +78,9 @@ class Spec:
     lock_timeout: float = None
     clock: object = None
     probes: dict = None
+    prepare_executable: str = None
+    ledger_config: str = None
+    ledger_policy: dict = None
 
 
 @dataclass
@@ -314,13 +325,20 @@ def _plan(spec, journal, faults):
             raise Refused(reason)
         if lstat_kind(live_module) not in ("missing", "file"):
             raise Refused(f"{live_module} is not a regular file")
-        drafted.append((rel, staged, live_software, retired, new_text, live_module))
+        drafted.append((rel, staged, live_software, retired, new_text, live_module, path))
 
     run_dir = run_dir_for(spec.state_root, journal["run_id"])
     plan = []
-    for rel, staged, live_software, retired, new_text, live_module in drafted:
+    for rel, staged, live_software, retired, new_text, live_module, staged_module in drafted:
         prepared = os.path.join(run_dir, "prepared", rel)
-        atomic_write(prepared, new_text, faults, f"prepare:{rel}")
+        metadata_source = live_module if lstat_kind(live_module) == "file" else staged_module
+        atomic_write(
+            prepared,
+            new_text,
+            faults,
+            f"prepare:{rel}",
+            metadata_from=metadata_source,
+        )
         stamp = {
             "run_id": journal["run_id"],
             "staged": staged,
@@ -414,7 +432,13 @@ def _prepare_module_backup(mod, faults):
         if current_hash != mod["old_hash"]:
             raise NeedsIntervention(f"{live} changed after the build")
         if lstat_kind(backup) == "missing":
-            atomic_write(backup, current, faults, f"publish.backup:{mod['rel']}")
+            atomic_write(
+                backup,
+                current,
+                faults,
+                f"publish.backup:{mod['rel']}",
+                metadata_from=live,
+            )
         elif lstat_kind(backup) != "file" or sha256_bytes(read_bytes(backup)) != mod["old_hash"]:
             raise NeedsIntervention(
                 f"backup for {mod['rel']} does not match the previous module file"
@@ -465,7 +489,13 @@ def _write_new_module(mod, faults):
             raise NeedsIntervention(f"{live} is not the previous module file")
     elif kind != "missing":
         raise NeedsIntervention(f"{live} appeared before it could be published")
-    atomic_write(live, prepared, faults, f"publish.file:{mod['rel']}")
+    atomic_write(
+        live,
+        prepared,
+        faults,
+        f"publish.file:{mod['rel']}",
+        metadata_from=mod["prepared"],
+    )
 
 
 def _restore_old_module(mod, faults):
@@ -482,7 +512,13 @@ def _restore_old_module(mod, faults):
             return
         if kind != "file" or sha256_bytes(read_bytes(live)) != mod["new_hash"]:
             raise NeedsIntervention(f"{live} is neither the old nor new module file")
-        atomic_write(live, previous, faults, f"restore.file:{mod['rel']}")
+        atomic_write(
+            live,
+            previous,
+            faults,
+            f"restore.file:{mod['rel']}",
+            metadata_from=backup,
+        )
         return
     if kind == "missing":
         return
@@ -569,7 +605,33 @@ def _restore_publish_baseline(journal):
         ) from error
 
 
+def _validate_publication_set(journal):
+    """Refuse before any live name moves when prepared access metadata cannot be read."""
+    for mod in journal["modules_plan"]:
+        try:
+            prepared = read_bytes(mod["prepared"])
+            if sha256_bytes(prepared) != mod["new_hash"]:
+                raise NeedsIntervention(f"prepared module bytes for {mod['rel']} changed")
+            try:
+                read_metadata(mod["prepared"])
+            except Refused as exc:
+                raise Refused(
+                    f"cannot validate publication for {mod['rel']}: {exc}"
+                ) from exc
+        except OSError as exc:
+            raise Refused(f"cannot validate publication for {mod['rel']}: {exc}") from exc
+
+
+def _recover_swap_names(journal):
+    """Put an interrupted ordinary-rename fallback back before another prepare."""
+    for mod in journal.get("modules_plan") or []:
+        if mod.get("live_software") and mod.get("retired"):
+            recover_interrupted_swap(mod["live_software"], mod["retired"])
+
+
 def _publish(spec, journal, faults):
+    _recover_swap_names(journal)
+    _validate_publication_set(journal)
     journal["state"] = "publishing"
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.publishing")
     clock = _clock(spec)
@@ -703,6 +765,129 @@ def _command_text(journal):
     return format_command(cmd)
 
 
+def _preparation_failure(spec, journal, faults, message, code):
+    journal["message"] = message
+    journal["prepare_returncode"] = code
+    journal["updated_at"] = _clock(spec)()
+    save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepare_failed")
+    _log(message)
+    return code
+
+
+def _prepare_publication(spec, journal, faults):
+    """Optional external permission step. It must not be required to rewrite roots."""
+    if not spec.prepare_executable or journal.get("prepare_complete"):
+        return 0
+    context_path = os.path.join(run_dir_for(spec.state_root, journal["run_id"]), "prepare-context.json")
+    context = {
+        "run_id": journal["run_id"],
+        "publication": "directory-swap",
+        "generation_root": journal["generation_root"],
+        "state_root": spec.state_root,
+        "live_software": spec.software,
+        "live_modules": spec.modules,
+        "stage_software": journal["stage_software"],
+        "stage_modules": journal["stage_modules"],
+        "modules": [
+            {
+                key: mod[key]
+                for key in ("rel", "staged", "live_software", "retired", "live_module", "prepared")
+            }
+            for mod in journal["modules_plan"]
+        ],
+    }
+    atomic_write(context_path, json.dumps(context, indent=2, sort_keys=True) + "\n", faults, "prepare.context")
+    command = [spec.prepare_executable, context_path]
+    _log("preparing publication permissions: " + format_command(command))
+    try:
+        rc = run_command(command, os.environ.copy(), faults, "prepare.invoke")
+    except OSError as exc:
+        return _preparation_failure(spec, journal, faults, f"publication preparation failed: {exc}", 2)
+    journal["prepare_returncode"] = rc
+    if rc != 0:
+        return _preparation_failure(
+            spec,
+            journal,
+            faults,
+            f"publication preparation exited {rc}; the live directory was not swapped",
+            rc,
+        )
+    try:
+        _validate_publication_set(journal)
+    except (Refused, NeedsIntervention) as exc:
+        return _preparation_failure(spec, journal, faults, str(exc), 2)
+    journal["message"] = ""
+    journal["prepare_complete"] = True
+    save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepared")
+    return 0
+
+
+def _publisher(journal):
+    path = journal.get("ledger_config")
+    if not path:
+        return None
+    policy = journal.get("ledger_policy")
+    if policy is None:
+        raise Refused("ledger policy is missing from the journal; inspect the publication before resuming")
+    if load_config(path) != policy:
+        raise Refused("ledger policy changed; restore the recorded configuration before resuming")
+    return EbStackLedger(policy)
+
+
+def _record(journal, faults, publisher, records, step):
+    run_dir = run_dir_for(journal["state_root"], journal["run_id"])
+    if records:
+        outbox.enqueue(run_dir, records, faults, step)
+    return outbox.deliver(run_dir, publisher, faults)
+
+
+def _pending_message(left):
+    return f"{len(left)} ledger event(s) not acknowledged ({left[0]['error']}); run resume"
+
+
+def _record_finished(spec, journal, faults, publisher, message):
+    if publisher is not None:
+        finished = publication_records(publisher.config, journal, "finished", _clock(spec)())
+        left = _record(journal, faults, publisher, finished, "outbox.finished")
+        if left:
+            message = f"{message}; {_pending_message(left)}"
+            _log(message)
+            return Result(outbox.PENDING_EXIT, journal["run_id"], "complete", message, _command_text(journal))
+    return Result(0, journal["run_id"], "complete", message, _command_text(journal))
+
+
+def _publish_recorded(spec, journal, faults):
+    """Swap only after a required ledger has acknowledged every started record."""
+    rc = _prepare_publication(spec, journal, faults)
+    if rc != 0:
+        return Result(rc, journal["run_id"], "failed", journal["message"], _command_text(journal))
+    publisher = _publisher(journal)
+    if publisher is not None:
+        _validate_publication_set(journal)
+        started = publication_records(publisher.config, journal, "started", _clock(spec)())
+        left = _record(journal, faults, publisher, started, "outbox.started")
+        if left and publisher.required:
+            journal["message"] = "the live directory was not swapped: " + _pending_message(left)
+            save_journal(
+                journal_path(spec.state_root, journal["run_id"]),
+                journal,
+                faults,
+                "journal.ledger_pending",
+            )
+            _log(journal["message"])
+            return Result(
+                outbox.PENDING_EXIT,
+                journal["run_id"],
+                journal["state"],
+                journal["message"],
+                _command_text(journal),
+            )
+    _publish(spec, journal, faults)
+    message = f"run {journal['run_id']} published {len(journal['modules_plan'])} module(s)"
+    _log(message)
+    return _record_finished(spec, journal, faults, publisher, message)
+
+
 def _run_locked(spec, faults, journal, fresh_build):
     path = journal_path(spec.state_root, journal["run_id"])
     if fresh_build:
@@ -720,10 +905,7 @@ def _run_locked(spec, faults, journal, fresh_build):
         journal["state"] = "built"
         journal["updated_at"] = _clock(spec)()
         save_journal(path, journal, faults, "journal.built")
-    _publish(spec, journal, faults)
-    message = f"run {journal['run_id']} published {len(journal['modules_plan'])} module(s)"
-    _log(message)
-    return Result(0, journal["run_id"], "complete", message, _command_text(journal))
+    return _publish_recorded(spec, journal, faults)
 
 
 def _blank_journal(spec, run_id, probes, rels):
@@ -741,6 +923,12 @@ def _blank_journal(spec, run_id, probes, rels):
         "eb_executable": spec.eb_executable,
         "grace_hours": spec.grace_hours,
         "skip_live_check": spec.skip_live_check,
+        "prepare_executable": spec.prepare_executable,
+        "ledger_config": spec.ledger_config,
+        "ledger_policy": spec.ledger_policy,
+        "prepare_complete": False,
+        "prepare_returncode": None,
+        "publication": "directory-swap",
         "module_rels": rels,
         "created_at": now,
         "updated_at": now,
@@ -773,6 +961,9 @@ def _select_backend(spec, probes):
 def run(spec):
     """Build into a new generation, then swap it with the live directory."""
     _check_roots(spec)
+    if spec.ledger_config is not None:
+        spec.ledger_policy = load_config(spec.ledger_config)
+        spec.ledger_config = spec.ledger_policy["path"]
     faults = _faults(spec)
     probes = spec.probes if spec.probes is not None else probe_all(spec.software, spec.eb_executable)
     spec.probes = probes
@@ -828,6 +1019,9 @@ def _spec_from_journal(journal, builder, faults, clock, lock_timeout):
         lock_timeout=lock_timeout,
         clock=clock,
         probes=journal.get("probes"),
+        prepare_executable=journal.get("prepare_executable"),
+        ledger_config=journal.get("ledger_config"),
+        ledger_policy=journal.get("ledger_policy"),
     )
 
 
@@ -849,7 +1043,7 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
         if state == "complete":
             message = f"run {run_id} is already complete"
             _log(message)
-            return Result(0, run_id, state, message, _command_text(journal))
+            return _record_finished(spec, journal, faults, _publisher(journal), message)
         if state == "rolled_back":
             raise Refused(f"run {run_id} was rolled back; start a new run")
         if state in ("created", "building", "failed"):
@@ -861,10 +1055,7 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
             return _run_locked(spec, faults, journal, fresh_build=True)
         if state in ("built", "publishing"):
             _log(f"resume {run_id} from {state}: publishing")
-            _publish(spec, journal, faults)
-            message = f"run {run_id} published {len(journal['modules_plan'])} module(s)"
-            _log(message)
-            return Result(0, run_id, "complete", message, _command_text(journal))
+            return _publish_recorded(spec, journal, faults)
         raise NeedsIntervention(f"run {run_id} is in an unknown state {state}")
     finally:
         lock.release()
@@ -894,6 +1085,24 @@ def _restore_published_baseline(journal):
     _create_links(journal, silent)
 
 
+def _record_rollback(journal, faults, publisher, finished, started, now, message):
+    """After the restore: finish the correction, or abort a publication that never finished."""
+    if publisher is None:
+        return Result(0, journal["run_id"], "rolled_back", message)
+    if finished:
+        records = publication_records(publisher.config, journal, "finished", now(), corrects=finished)
+    elif started:
+        records = publication_records(publisher.config, journal, "aborted", now())
+    else:
+        records = []
+    left = _record(journal, faults, publisher, records, "outbox.rollback_finished")
+    if left:
+        message = f"{message}; {_pending_message(left)}"
+        _log(message)
+        return Result(outbox.PENDING_EXIT, journal["run_id"], "rolled_back", message, _command_text(journal))
+    return Result(0, journal["run_id"], "rolled_back", message, _command_text(journal))
+
+
 def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
     """Exchange every retired tree back into place as one recoverable operation."""
     path = journal_path(state_root, run_id)
@@ -907,14 +1116,39 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
             from eb_staged_rebuild.retire import rollback_retire
 
             return rollback_retire(state_root, journal, faults, now)
+        publisher = _publisher(journal)
+        finished = {}
+        started = False
+        if publisher is not None:
+            left = _record(journal, faults, publisher, [], None)
+            if left and publisher.required:
+                message = f"run {run_id} was not rolled back: {_pending_message(left)}"
+                _log(message)
+                return Result(outbox.PENDING_EXIT, run_id, journal["state"], message, _command_text(journal))
+            events = outbox.load(run_dir_for(state_root, run_id))["events"]
+            finished = {
+                event["record"]["build"]["module_file"]: event["receipt"]["id"]
+                for event in events
+                if event["status"] == "acknowledged"
+                and event["record"]["action"] != "correction"
+                and event["record"]["stage"] == "finished"
+            }
+            started = any(event["record"]["stage"] == "started" for event in events)
         if journal["state"] == "rolled_back" and all(
             mod.get("status") == "restored" for mod in journal.get("modules_plan") or []
         ):
             message = f"run {run_id} is already rolled back"
             _log(message)
-            return Result(0, run_id, "rolled_back", message)
+            return _record_rollback(journal, faults, publisher, finished, started, now, message)
         if journal["state"] != "complete":
             raise Refused(f"run {run_id} is {journal['state']}; only a complete run can roll back")
+        if finished:
+            records = publication_records(publisher.config, journal, "started", now(), corrects=finished)
+            left = _record(journal, faults, publisher, records, "outbox.rollback_started")
+            if left and publisher.required:
+                message = f"run {run_id} was not rolled back: {_pending_message(left)}"
+                _log(message)
+                return Result(outbox.PENDING_EXIT, run_id, journal["state"], message, _command_text(journal))
         try:
             for mod in reversed(journal.get("modules_plan") or []):
                 result = swap_directories(
@@ -959,7 +1193,7 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
             raise
         message = f"run {run_id} rolled back; replacement kept at its retired path"
         _log(message)
-        return Result(0, run_id, "rolled_back", message)
+        return _record_rollback(journal, faults, publisher, finished, started, now, message)
     finally:
         lock.release()
 
@@ -981,7 +1215,7 @@ def _dry_run(spec, probes, faults):
         + ": "
         + ("yes" if exchange.get("ok") else "no"),
         "easybuild: " + (easybuild.get("version_text") or easybuild.get("reason") or "not found"),
-        "flock cross-node: unmeasured (open-004)",
+        "lock: flock gate plus POSIX record lock; cross-node coherence unmeasured (open-004)",
         "publish: renameat2(RENAME_EXCHANGE), with a restoring ordinary-rename fallback",
     ]
     problems = []
