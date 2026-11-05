@@ -86,7 +86,10 @@ eb-staged-rebuild retire \
   --dry-run
 ```
 
-Drop `--dry-run` to move the file. `rollback` with the printed `retire-<timestamp>` id puts it back. `gc` lists the software directory as ready to remove by hand once `--grace-hours` have passed. The state root must be on the same filesystem as the module tree.
+Drop `--dry-run` to move the file. `rollback` with the printed `retire-<timestamp>` id puts it back. `gc` lists the software directory as ready to remove by hand once `--grace-hours` have passed. The state root must be on the same filesystem as the module tree. Cleanup holds the publication lock while checking
+references and removing a retired generation. It restores owner permissions
+only inside the owned generation and unlinks symbolic links without following
+their targets, so sealed EasyBuild directories can be removed safely.
 
 The operator notes are in [docs/runbook.md](docs/runbook.md). The choice of design is in [DESIGN.md](DESIGN.md).
 

@@ -24,12 +24,13 @@ delete outside ``generations/``.
 """
 
 import os
-import shutil
 import time
 
 from eb_staged_rebuild.atomicio import read_bytes
+from eb_staged_rebuild.cleanup import remove_generation_tree
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
+from eb_staged_rebuild.lockfile import FileLock
 from eb_staged_rebuild.modulefile import parse_root
 from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
 from eb_staged_rebuild.retire import is_retire
@@ -115,6 +116,15 @@ def _retirement(journal, journals, include_failed):
 
 def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
     state_root = abspath(state_root)
+    lock = FileLock(state_root)
+    lock.acquire()
+    try:
+        return _collect_locked(state_root, grace_hours, now, dry_run, include_failed)
+    finally:
+        lock.release()
+
+
+def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
     generations = os.path.join(state_root, "generations")
     journals = list_journals(state_root)
     roots = _live_roots(journals)
@@ -151,7 +161,7 @@ def collect(state_root, grace_hours, now, dry_run=False, include_failed=False):
         actions.append({"path": generation, "action": "remove", "reason": why, "retired_at": when})
         if dry_run:
             continue
-        shutil.rmtree(generation)
+        remove_generation_tree(generation, generations)
         journal["generation_removed_at"] = now
         journal["message"] = f"generation removed ({why})"
         save_journal(journal_path(state_root, journal["run_id"]), journal, None, "journal.gc")

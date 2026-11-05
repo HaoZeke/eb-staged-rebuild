@@ -20,6 +20,7 @@ from eb_staged_rebuild.builders import (
     installpath_dirs,
     run_command,
 )
+from eb_staged_rebuild.cleanup import remove_generation_tree
 from eb_staged_rebuild.discover import (
     generation_for,
     map_link_target,
@@ -467,7 +468,7 @@ def _clear_stage_modules(generation_root):
     if os.path.islink(modules):
         raise Refused(f"refusing to clear a symlinked module stage: {modules}")
     if os.path.isdir(modules):
-        shutil.rmtree(modules)
+        remove_generation_tree(modules, generation_root)
 
 
 def _build(spec, journal, faults):
