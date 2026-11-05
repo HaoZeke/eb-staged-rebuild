@@ -13,11 +13,12 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
-import tempfile
 import time
 
+from eb_staged_rebuild.builders import _group_running
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.outbox import PublisherError
 
@@ -26,6 +27,9 @@ _SUMMARY = re.compile(
     r"head size (\d+) root ([0-9a-f]{64})(?:; .*)?$"
 )
 _OUTPUT_LIMIT = 64 * 1024
+_READ_SIZE = 64 * 1024
+# Enough reads to empty a pipe grown to the unprivileged size ceiling (1 MiB).
+_DRAIN_READS = 16
 _FIELDS = ("actor", "stack", "target")
 _ACTIONS = ("install", "rebuild-inplace", "rebuild-bump")
 
@@ -101,28 +105,80 @@ def load_config(path):
     config["path"] = path
     return config
 
+def _stop_group(child):
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if os.path.isdir("/proc"):
+        while _group_running(child.pid):
+            time.sleep(0.01)
+
+def _keep(fd, kept, reads=1):
+    """Read at most ``reads`` chunks, keeping the stream's first ``_OUTPUT_LIMIT`` bytes."""
+    for _ in range(reads):
+        try:
+            chunk = os.read(fd, _READ_SIZE)
+        except BlockingIOError:
+            return True
+        if not chunk:
+            return False
+        kept += chunk[: _OUTPUT_LIMIT - len(kept)]
+    return True
+
 def _bounded(argv, timeout):
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+    """Run ``argv`` in its own process group; return its code and leading output.
+
+    Output goes through pipes: each stream keeps its first ``_OUTPUT_LIMIT``
+    bytes in memory and the rest is read and dropped, so nothing reaches
+    disk. The group is killed, and every member has exited, before this
+    returns or raises, including on timeout and interruption; the unreaped
+    leader reserves the group identifier until then. A writer that left the
+    group is not waited for: it gets EPIPE once the pipes close, as does a
+    helper whose caller was killed.
+    """
+    pipes = [os.pipe(), os.pipe()]
+    kept = (bytearray(), bytearray())
+    child = None
+    try:
         try:
             child = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True
+                argv, stdin=subprocess.DEVNULL, stdout=pipes[0][1], stderr=pipes[1][1],
+                start_new_session=True,
             )
         except OSError as exc:
             raise PublisherError(f"cannot start {argv[0]}: {exc}") from exc
+        finally:
+            for _read, write in pipes:
+                os.close(write)
+        with selectors.DefaultSelector() as selector:
+            for index, (read, _write) in enumerate(pipes):
+                os.set_blocking(read, False)
+                selector.register(read, selectors.EVENT_READ, kept[index])
+            deadline = time.monotonic() + timeout
+            while os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PublisherError(f"{argv[0]} {argv[1]} {argv[2]} timed out after {timeout}s")
+                if not selector.get_map():
+                    time.sleep(min(remaining, 0.02))
+                    continue
+                for key, _events in selector.select(min(remaining, 0.05)):
+                    if not _keep(key.fd, key.data):
+                        selector.unregister(key.fd)
+            _stop_group(child)
+            for key in list(selector.get_map().values()):
+                _keep(key.fd, key.data, _DRAIN_READS)
+        code = child.wait()
+    finally:
         try:
-            code = child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait()
-            raise PublisherError(f"{argv[0]} {argv[1]} {argv[2]} timed out after {timeout}s")
-        texts = []
-        for handle in (out, err):
-            handle.seek(0)
-            texts.append(handle.read(_OUTPUT_LIMIT).decode("utf-8", "replace"))
-    return code, texts[0], texts[1]
+            if child is not None and child.returncode is None:
+                _stop_group(child)
+                child.wait()
+        finally:
+            for read, _write in pipes:
+                os.close(read)
+    return code, kept[0].decode("utf-8", "replace"), kept[1].decode("utf-8", "replace")
 
 def _logged_event(log, index):
     try:
