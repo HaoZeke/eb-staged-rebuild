@@ -75,6 +75,19 @@ Not built. It is a different install layout, and it does not fix a binary whose 
 * Guessing `bwrap_installpath_software` for an EasyBuild version whose `bwrap.py` was not read. 5.3.0 and 5.3.1 use the layout in their source. Anything else without the key is left unpublished.
 * Falling back from a failed `bwrap` probe to an in-place rebuild. The installpath backend does not need bubblewrap. The bwrap backend stops.
 
+## Sealed software directories
+
+The builder may remove write permission from a completed software directory.
+Publication reads the install metadata and leaves that directory's bytes and
+permissions intact. Per-module completion records belong under
+`runs/<run-id>/stamps/`, beside prepared module files and backups, rather
+than inside the software installation. The state directory remains writable
+for journaling and recovery.
+
+This separation also lets a crash resume publication without reopening or
+rebuilding a sealed generation. Rollback changes the module pointer and
+retains the generation as built.
+
 ## Residual risk
 
 * A module file replace is atomic for readers of that file. It is not atomic across several module files. A crash in the middle of a multi-module publish can leave one module on the new generation and another on the old. Each file still resolves to one complete generation. Dependencies are published first. `resume` finishes the list; `rollback` restores it in reverse.

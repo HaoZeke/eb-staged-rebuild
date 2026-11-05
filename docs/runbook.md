@@ -42,6 +42,11 @@ The lock combines `flock` on `<state-root>/.lock` with a POSIX record lock on `<
 
 Drain every flock-only publisher before using the dual protocol across nodes. Mixing versions preserves same-node exclusion but provides no cross-node exclusion. Forked children close inherited descriptors without unlocking the parent; the lock does not survive exec.
 
+The state directory and live module directories must be writable by the
+publisher. Completed software directories may be read-only. Completion records
+are under `runs/<run-id>/stamps/`; publishing and rollback do not add files
+to, or relax permissions on, the installed software.
+
 ## Crash
 
 `status` shows the journal state.
