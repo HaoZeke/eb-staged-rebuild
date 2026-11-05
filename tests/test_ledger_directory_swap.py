@@ -159,7 +159,8 @@ class DirectorySwapLedgerTests(unittest.TestCase):
             fixture = Fixture(root)
             fixture.plan_modes("fail-before")
             self.assertEqual(run(fixture.spec()).returncode, 75)
-            policy = json.loads(open(fixture.config, encoding="utf-8").read())
+            with open(fixture.config, encoding="utf-8") as handle:
+                policy = json.loads(handle.read())
             policy["actor"] = "other"
             with open(fixture.config, "w", encoding="utf-8") as handle:
                 json.dump(policy, handle)
@@ -209,12 +210,14 @@ class DirectorySwapLedgerTests(unittest.TestCase):
             }
             with open(os.path.join(run_dir, "journal.json"), "w", encoding="utf-8") as handle:
                 json.dump(foreign, handle)
-            before = open(fixture.module, encoding="utf-8").read()
+            with open(fixture.module, encoding="utf-8") as handle:
+                before = handle.read()
             with self.assertRaisesRegex(NeedsIntervention, "generation-pointer"):
                 load_journal(os.path.join(run_dir, "journal.json"))
             with self.assertRaises(NeedsIntervention):
                 resume(fixture.state, "foreign", builder=fixture.builder)
-            self.assertEqual(open(fixture.module, encoding="utf-8").read(), before)
+            with open(fixture.module, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), before)
             self.assertEqual(fixture.payload(), "v0\n")
             # save_journal must not rewrite this record into a directory swap.
             with self.assertRaises(NeedsIntervention):
