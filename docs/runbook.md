@@ -8,7 +8,7 @@ Use this on a prefix where jobs are loading modules. Read [DESIGN.md](../DESIGN.
    * `bwrap: usable` is required only for `--backend bwrap`. The default backend is `installpath` and does not run bubblewrap.
    * `user.max_user_namespaces` is the host's sysctl. A value of 0 means the bwrap backend will refuse. This does not answer the site's STIG (`open-004`).
    * `RENAME_EXCHANGE` is reported for the filesystem that holds `--path`. The publish step does not use it. `yes` on one ext4 disk is not a result for GPFS.
-   * `flock across nodes: unmeasured` is intentional. Two runs on one machine take the same lock. Two build nodes are `open-004`.
+   * `flock across nodes: unmeasured` describes BSD flock alone. The publisher also takes a POSIX record lock. Verify two-node exclusion with the complete protocol on the target filesystem; a single-host probe cannot establish it.
 2. `eb --show-config` and confirm `remove-ghost-install-dirs` is not true. This tool strips the command-line flag and the environment variable. One local run with a config file that set it true, and with a fresh module tree, left the old install in place. Do not treat that as a test of every configuration. A generation's `modules/` directory is removed before `eb` runs so a resumed build does not leave EasyBuild a module file that names the live directory.
 3. Pick `--grace-hours` from the longest job the site will run. The default 144 is the figure in the notes (120 hours plus a day). It is not a measured walltime. `gc` will not delete anything until that many hours after a later publish or a rollback. It never deletes `software/<name>/<version>`.
 
@@ -38,7 +38,9 @@ The arguments after `--` are passed to `eb`, except install-path, prefix, bwrap,
 
 `--backend bwrap` runs `eb --experimental --bwrap`. If the probe fails, the run stops. It does not rebuild in place. EasyBuild 5.3.0 and 5.3.1 omit `bwrap_installpath_software`; those two versions use `<bwrap-installpath>/software` and `<bwrap-installpath>/modules`, which is what their `bwrap.py` joins. Any other version that omits the key is left unpublished. An overlay upper (`--overlay` in `bwrap_cmd`) is not a complete tree and is not published.
 
-The lock is `flock` on `<state-root>/.lock`, held from the start of the build until publish finishes. The lock file remaining after a crash is not a held lock. The pid in the file is a hint.
+The lock combines `flock` on `<state-root>/.lock` with a POSIX record lock on `<state-root>/.lock.posix`, held from the start of the build until publish finishes. The sidecar is opened only under the local gate and closed before that gate is released. Other code in the same process must not open the sidecar. Never unlink either file while the state root is active. The files remaining after a crash are not held locks; the filesystem controls recovery after node failure. The pid in `.lock` is a hint.
+
+Drain every flock-only publisher before using the dual protocol across nodes. Mixing versions preserves same-node exclusion but provides no cross-node exclusion. Forked children close inherited descriptors without unlocking the parent; the lock does not survive exec.
 
 ## Crash
 
