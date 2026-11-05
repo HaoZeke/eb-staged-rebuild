@@ -11,10 +11,11 @@ removes a hidden sibling recorded by a directory swap.
 """
 
 import os
-import shutil
+import stat
 import time
 
 from eb_staged_rebuild.atomicio import read_bytes
+from eb_staged_rebuild.cleanup import remove_generation_tree
 from eb_staged_rebuild.constants import SECONDS_PER_HOUR
 from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
@@ -48,40 +49,63 @@ def _safe_retired_path(mod):
     return retired
 
 
+def _module_root(path):
+    """Return the software directory a tracked module names, or None if it is absent.
+
+    An unreadable, non-regular, or rootless module is a refusal. Guessing that
+    nothing refers to a tree is how a collector deletes a directory that is
+    still published.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise Refused(f"cannot inspect live module {path}: {error}") from error
+    if not stat.S_ISREG(mode):
+        raise Refused(f"cannot determine live references from a non-regular module: {path}")
+    try:
+        _syntax, root = parse_root(read_bytes(path).decode("utf-8"))
+    except (OSError, UnicodeError) as error:
+        raise Refused(f"cannot read live references from {path}: {error}") from error
+    if not root:
+        raise Refused(f"cannot determine the live software root from {path}")
+    return abspath(root)
+
+
+def _resolved(path):
+    try:
+        return os.path.realpath(path, strict=True)
+    except OSError as error:
+        raise Refused(f"cannot resolve live software references from {path}: {error}") from error
+
+
 def _live_roots(journals):
     roots = set()
     for journal in journals:
         if is_retire(journal):
             # A retire that is not complete, or that was rolled back, leaves the
             # module file live at its original path.
-            if journal.get("state") != "retired" and lstat_kind(journal["module_path"]) == "file":
-                try:
-                    _syntax, root = parse_root(read_bytes(journal["module_path"]).decode("utf-8"))
-                except (OSError, UnicodeError):
-                    continue
+            if journal.get("state") != "retired":
+                root = _module_root(journal["module_path"])
                 if root:
-                    roots.add(abspath(root))
+                    roots.add(root)
+                    roots.add(_resolved(root))
             continue
         for mod in journal.get("modules_plan") or []:
             live = mod.get("live_module")
-            if not live or lstat_kind(live) != "file":
+            if not live:
                 continue
-            try:
-                text = read_bytes(live).decode("utf-8")
-            except (OSError, UnicodeError):
-                continue
-            _syntax, root = parse_root(text)
+            root = _module_root(live)
             if root:
-                roots.add(abspath(root))
+                roots.add(root)
+                roots.add(_resolved(root))
     return roots
 
 
 def _referenced(directory, roots):
-    directory = abspath(directory)
-    for root in roots:
-        if is_within(root, directory):
-            return True
-    return False
+    spellings = {abspath(directory), _resolved(directory)}
+    return any(is_within(root, spelling) for root in roots for spelling in spellings)
 
 
 def _iso(when):
@@ -138,6 +162,7 @@ def _retired_software(journals, roots, grace_hours, now):
 def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
     state_root = abspath(state_root)
     journals = list_journals(state_root)
+    roots = _live_roots(journals)
     actions = []
     for journal in journals:
         if is_retire(journal):
@@ -154,6 +179,15 @@ def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
                 actions.append({"path": retired, "action": "keep", "reason": why})
                 continue
             age = now - when
+            if _referenced(retired, roots):
+                actions.append(
+                    {
+                        "path": retired,
+                        "action": "keep",
+                        "reason": "a live module resolves inside it",
+                    }
+                )
+                continue
             if age < grace_hours * SECONDS_PER_HOUR:
                 actions.append(
                     {
@@ -174,7 +208,7 @@ def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
             )
             if dry_run:
                 continue
-            shutil.rmtree(retired)
+            remove_generation_tree(retired, os.path.dirname(retired))
             mod["retired_removed_at"] = now
             changed = True
         if changed:
@@ -185,7 +219,7 @@ def _collect_locked(state_root, grace_hours, now, dry_run, include_failed):
                 None,
                 "journal.gc",
             )
-    actions.extend(_retired_software(journals, _live_roots(journals), grace_hours, now))
+    actions.extend(_retired_software(journals, roots, grace_hours, now))
     return actions
 
 
