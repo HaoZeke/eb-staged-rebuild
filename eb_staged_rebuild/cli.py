@@ -69,6 +69,7 @@ def _parser():
     run_p.add_argument("--dry-run", action="store_true")
     run_p.add_argument("--module", action="append", default=[], dest="module_rels", metavar="NAME/VERSION")
     run_p.add_argument("--run-id", default=None)
+    run_p.add_argument("--prepare", help="executable called with a generation context JSON before module publication")
     run_p.add_argument("--lock-timeout", type=float, default=None)
     run_p.add_argument("--skip-live-check", action="store_true")
     run_p.add_argument("eb_args", nargs=argparse.REMAINDER, help="easyconfig and eb options, after --")
@@ -164,6 +165,7 @@ def _dispatch(args):
             eb_executable=args.eb,
             run_id=args.run_id,
             skip_live_check=args.skip_live_check,
+            prepare_executable=os.path.abspath(args.prepare) if args.prepare else None,
             lock_timeout=args.lock_timeout,
         )
         result = run(spec)

@@ -37,6 +37,22 @@ eb-staged-rebuild run \
 
 `--software` and `--modules` are the live trees. They also come from `EASYBUILD_INSTALLPATH_SOFTWARE` and `EASYBUILD_INSTALLPATH_MODULES`. The state directory defaults to `<parent of software>/.eb-staged-rebuild`.
 
+A site permission finalizer can run before any module becomes visible:
+
+```bash
+eb-staged-rebuild run --prepare /absolute/path/to/finalize-permissions -- file.eb --robot
+```
+
+The executable receives one argument: a JSON file naming the generation,
+staged software and module roots, and each module's software directory.
+It applies and verifies the site's permissions in that generation and
+returns zero to permit publication. A nonzero exit leaves live modules
+unchanged. The finalizer runs outside the EasyBuild sandbox. It must be
+idempotent because a crash can require repeating it. Its path and result
+are retained in the run journal; resume runs an unfinished finalizer before
+publication. A completed finalizer is not repeated while resuming module
+publication.
+
 After a crash:
 
 ```bash

@@ -69,6 +69,7 @@ class Spec:
     lock_timeout: float = None
     clock: object = None
     probes: dict = None
+    prepare_executable: str = None
 
 
 @dataclass
@@ -104,6 +105,8 @@ class _Ctx:
 
 
 def _check_roots(spec):
+    if spec.prepare_executable and not os.path.isabs(spec.prepare_executable):
+        raise Refused("publication preparation executable must be an absolute path")
     if not is_real_dir(spec.software):
         kind = lstat_kind(spec.software)
         if kind == "symlink":
@@ -444,6 +447,8 @@ def _clear_stage_modules(generation_root):
 
 
 def _build(spec, journal, faults):
+    journal["prepare_complete"] = False
+    journal["prepare_returncode"] = None
     journal["state"] = "building"
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.building")
     ctx = _Ctx(spec, journal["generation_root"], faults)
@@ -487,6 +492,35 @@ def _command_text(journal):
     return format_command(cmd)
 
 
+def _prepare_publication(spec, journal, faults):
+    if not spec.prepare_executable or journal.get("prepare_complete"):
+        return 0
+    context_path = os.path.join(run_dir_for(spec.state_root, journal["run_id"]), "prepare-context.json")
+    context = {
+        "run_id": journal["run_id"],
+        "generation_root": journal["generation_root"],
+        "stage_software": journal["stage_software"],
+        "stage_modules": journal["stage_modules"],
+        "modules": [
+            {key: mod[key] for key in ("rel", "generation", "live_module")}
+            for mod in journal["modules_plan"]
+        ],
+    }
+    atomic_write(context_path, json.dumps(context, indent=2, sort_keys=True) + "\n", faults, "prepare.context")
+    command = [spec.prepare_executable, context_path]
+    _log("preparing generation permissions: " + format_command(command))
+    try:
+        rc = run_command(command, os.environ.copy(), faults, "prepare.invoke")
+    except OSError as exc:
+        return _fail(spec, journal, faults, f"publication preparation failed: {exc}", 2).returncode
+    journal["prepare_returncode"] = rc
+    if rc != 0:
+        return _fail(spec, journal, faults, f"publication preparation exited {rc}; live modules were not changed", rc).returncode
+    journal["prepare_complete"] = True
+    save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepared")
+    return 0
+
+
 def _run_locked(spec, faults, journal, fresh_build):
     path = journal_path(spec.state_root, journal["run_id"])
     if fresh_build:
@@ -504,6 +538,9 @@ def _run_locked(spec, faults, journal, fresh_build):
         journal["state"] = "built"
         journal["updated_at"] = _clock(spec)()
         save_journal(path, journal, faults, "journal.built")
+    rc = _prepare_publication(spec, journal, faults)
+    if rc != 0:
+        return Result(rc, journal["run_id"], "failed", journal["message"], _command_text(journal))
     _publish(spec, journal, faults)
     message = f"run {journal['run_id']} published {len(journal['modules_plan'])} module(s)"
     _log(message)
@@ -525,6 +562,9 @@ def _blank_journal(spec, run_id, probes, rels):
         "eb_executable": spec.eb_executable,
         "grace_hours": spec.grace_hours,
         "skip_live_check": spec.skip_live_check,
+        "prepare_executable": spec.prepare_executable,
+        "prepare_complete": False,
+        "prepare_returncode": None,
         "module_rels": rels,
         "created_at": now,
         "updated_at": now,
@@ -585,6 +625,7 @@ def _spec_from_journal(journal, builder, faults, clock, lock_timeout):
         lock_timeout=lock_timeout,
         clock=clock,
         probes=journal.get("probes"),
+        prepare_executable=journal.get("prepare_executable"),
     )
 
 
@@ -616,6 +657,9 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
             return _run_locked(spec, faults, journal, fresh_build=True)
         if state in ("built", "publishing"):
             _log(f"resume {run_id} from {state}: publishing")
+            rc = _prepare_publication(spec, journal, faults)
+            if rc != 0:
+                return Result(rc, run_id, "failed", journal["message"], _command_text(journal))
             _publish(spec, journal, faults)
             message = f"run {run_id} published {len(journal['modules_plan'])} module(s)"
             _log(message)
