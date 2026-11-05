@@ -49,7 +49,7 @@ record-lock sidecar `<state-root>/.lock.posix`, in seconds. Omit it and the
 wait has no deadline. `retire` defaults to 0. A 0.2.0 process takes only the
 local flock lock. That process does not take the sidecar.
 
-`--prepare` names an executable that receives a
+The `--prepare` option names an executable. That executable receives a
 directory-swap context JSON before the live directory is exchanged.
 `--ledger-config` names a JSON eb-stack ledger configuration; `started`
 records are acknowledged before the swap, and the stable

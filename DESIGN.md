@@ -6,8 +6,8 @@ the live install for a staged build. The program writes a complete replacement
 in a separate tree, takes one `flock` for the build and publish transaction,
 and then swaps the staged directory with `software/<name>/<version>`.
 
-The stable path remains a real directory. A successful rebuild changes the
-inode and the file bytes at that path. The retired directory is kept as
+The swap keeps a real directory at the live install path. A successful
+rebuild changes the inode and the file bytes at that path. The retired directory is kept as
 `software/<name>/.<version>.<run-id>` for rollback and for running processes
 that still hold old files open.
 
@@ -37,18 +37,16 @@ EasyBuild options that could redirect the build are removed:
 `--remove-ghost-install-dirs`. `--rebuild` is added unless `--rebuild`,
 `--force`, or `-f` is already present.
 
-## Publish transaction
+## Publish path
 
-For every module, planning:
+The planner requires an existing non-symlink live `Name/version` directory for
+each module. The planner verifies that the staged install is complete. The
+planner writes a run marker into the staged install. The planner prepares a
+module file whose root is the stable live path. The planner records and durably
+backs up the current module file. The planner moves the stage to a hidden
+sibling on the same filesystem.
 
-* requires an existing, non-symlink live `Name/version` directory;
-* verifies that the staged install is complete;
-* writes a run marker into the staged install;
-* prepares a module file whose root is the stable live path;
-* records and durably backs up the current module file; and
-* moves the stage to a hidden sibling on the same filesystem.
-
-Publish first attempts Linux `renameat2` with `RENAME_EXCHANGE` (`1 << 1`,
+The publish step attempts Linux `renameat2` with `RENAME_EXCHANGE` first (`1 << 1`,
 from `include/uapi/linux/fs.h`). The syscall changes both directory names in
 one operation. `EINVAL`, `ENOSYS`, or `EOPNOTSUPP` selects the shared-filesystem
 fallback:
@@ -98,8 +96,9 @@ coherence remains an `open-004` measurement. Recovery after a failed node
 remains an `open-004` measurement. This repository has not measured General
 Parallel File System. The ext4 tests are not acceptance of that filesystem.
 
-The journal records the stage, the stable path, the retired path, the hashes,
-and the completed steps. `resume` is idempotent. `resume` first recovers an
+After the flock and the POSIX record lock are taken, the journal records
+the stage, the stable path, the retired path, the hashes, and the completed
+steps. `resume` is idempotent. `resume` first recovers an
 interrupted fallback. `resume` then returns any interrupted publish to the
 old tree.
 
@@ -224,7 +223,7 @@ one is closed in this tree, or kept on purpose.
 1. Closed. Dependency order reads Lua `load` and `depends_on`, and Tcl `module load`. A cycle still finishes in path order.
 2. Closed. The live-change record includes a SHA-256 of each file's contents.
 3. Closed. `--skip-live-check` is documented. It skips that record.
-4. Closed. A `--module` value or a parsed module path that leaves the software or module root is refused.
+4. Closed. The tool refuses a `--module` value or a parsed module path that leaves the software or module root.
 5. Closed. Symlink components of a module path are refused. The refusal still applies when the module file is missing.
 6. Closed. Stage roots taken from `bwrap_info.json` must stay inside the run's generation directory.
 7. Closed. A missing `Name/version` is refused before EasyBuild. The build does not create the live directory.

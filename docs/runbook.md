@@ -3,9 +3,9 @@
 Use this wrapper only for an existing real-directory install. New installs do
 not need an in-place rebuild and are refused.
 
-## Preflight
+## Probe checks
 
-Run the probe as the same account and on the same filesystem used by CI:
+Run `eb-staged-rebuild probe` as the same account on the CI filesystem:
 
 ```bash
 eb-staged-rebuild probe --path /shared/software
@@ -105,10 +105,7 @@ eb-staged-rebuild rollback \
   RUN_ID
 ```
 
-Rollback swaps the hidden previous directory back into the stable path in
-reverse module order and restores module files. A caught rollback failure
-returns every completed operation to the published state, so retrying the same
-command is safe.
+Rollback puts the hidden previous directory back on the stable path, module by module in reverse order. Rollback then restores the module files. If rollback fails partway, the tool returns every completed operation to the published state. Retrying the same command is then safe.
 
 ## Garbage collection
 
@@ -122,9 +119,7 @@ eb-staged-rebuild gc \
   --dry-run
 ```
 
-Read the listed paths. Run the same command again without `--dry-run` when
-the list is the set you intend to remove. Collection accepts only the exact
-hidden sibling recorded beside its stable live directory. Collection does not
+Grace still bounds removal. The dry-run lists candidate paths. Read those paths. Run the same command again without `--dry-run` when those paths are the ones to remove. Collection accepts only the exact hidden sibling recorded beside its stable live directory. Collection does not
 use node-local `lsof`. Collection cannot see an old file that is open on
 another node. A software directory named by `retire` is reported. Collection
 leaves that directory in place.
@@ -184,8 +179,8 @@ eb-staged-rebuild run \
   sibling of the software tree named `.eb-staged-rebuild`.
 * `--backend` is `auto`, `bwrap`, `userns`, or `installpath`.
 * `--grace-hours` defaults to `EB_STAGED_REBUILD_GRACE_HOURS`, or else 144.
-* `--run-id` forces the journal id. The default joins a Coordinated Universal
-  Time value with the process id.
+* The `--run-id` option sets the journal id.
+* Without `--run-id`, the id joins the process id to a clock reading in coordinated universal time.
 * `--lock-timeout` takes a number of seconds. The command waits that long for
   the state-root lock and then refuses. Omit the option and the wait has no
   deadline.
