@@ -11,7 +11,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 
-from eb_staged_rebuild.atomicio import atomic_write, read_bytes, sha256_bytes
+from eb_staged_rebuild.atomicio import atomic_write, read_bytes, read_metadata, sha256_bytes
 from eb_staged_rebuild.builders import (
     bwrap_command,
     dry_run_command,
@@ -418,6 +418,10 @@ def _validate_publication_set(journal):
             prepared = read_bytes(mod["prepared"])
             if sha256_bytes(prepared) != mod["new_hash"]:
                 raise NeedsIntervention(f"prepared module bytes for {mod['rel']} changed")
+            try:
+                read_metadata(mod["prepared"])
+            except Refused as exc:
+                raise Refused(f"cannot inspect access metadata for {mod['prepared']}: {exc}") from exc
             if not generation_complete(mod["generation"]):
                 raise Refused(f"refusing to publish an incomplete generation {mod['generation']}")
             live = mod["live_module"]

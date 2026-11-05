@@ -3,8 +3,23 @@
 import errno
 import os
 import stat
+from collections import namedtuple
 
 from eb_staged_rebuild.errors import Refused
+
+# Most native first. A filesystem may expose one ACL through several names
+# (a native NFSv4 model, the generic NFSv4 model, a POSIX projection); only
+# the most native listed name is written and every listed name is verified.
+ACL_ATTRIBUTES = (
+    "system.gpfs_nfs4_acl",
+    "system.nfs4_acl",
+    "system.posix_acl_access",
+)
+
+_NO_DATA = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+_NOT_PROVIDED = _NO_DATA | {errno.ENOTSUP, errno.EOPNOTSUPP}
+
+Metadata = namedtuple("Metadata", "info acls")
 
 
 def fsync_dir(path):
@@ -24,52 +39,124 @@ def file_mode(path):
     return 0o644 & ~umask
 
 
-def _acl_missing(error):
-    return error.errno in {
-        errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA),
-        errno.ENOTSUP, errno.EOPNOTSUPP,
-    }
+def _identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_ctime_ns)
 
 
-def _metadata(path):
+def _listed_acls(fd):
+    names = set()
+    for name in os.listxattr(fd):
+        if name in ACL_ATTRIBUTES:
+            names.add(name)
+        elif name.startswith("system."):
+            raise Refused(f"unsupported access-control attribute {name}")
+    return names
+
+
+def _read_listed(fd):
+    acls = {}
+    for name in sorted(_listed_acls(fd)):
+        try:
+            acls[name] = os.getxattr(fd, name)
+        except OSError as error:
+            if error.errno in _NO_DATA:
+                raise Refused(f"{name} was listed but is no longer readable") from error
+            raise
+    return acls
+
+
+def read_acls(fd):
+    """Return every listed ACL attribute of an open regular file as opaque bytes.
+
+    A listed attribute that cannot be read, an ACL name that reads back
+    without being listed, and any change while inspecting are refusals.
+    The second pass catches changes inside one ctime tick.
+    """
+    before = os.fstat(fd)
+    acls = _read_listed(fd)
+    for name in ACL_ATTRIBUTES:
+        if name in acls:
+            continue
+        try:
+            os.getxattr(fd, name)
+        except OSError as error:
+            if error.errno in _NOT_PROVIDED:
+                continue
+            raise
+        raise Refused(f"{name} is readable but listxattr did not list it")
+    if _read_listed(fd) != acls or _identity(os.fstat(fd)) != _identity(before):
+        raise Refused("access metadata changed during inspection")
+    return acls
+
+
+def read_metadata(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise Refused(f"metadata source is not a regular file: {path}")
-        try:
-            acl = os.getxattr(fd, "system.posix_acl_access")
-        except OSError as error:
-            if not _acl_missing(error):
-                raise
-            acl = None
-        return info, acl
+        return Metadata(info, read_acls(fd))
     finally:
         os.close(fd)
 
 
+def _same_metadata(left, right):
+    return _identity(left.info) == _identity(right.info) and left.acls == right.acls
+
+
 def _restore_metadata(fd, metadata, mode):
-    if metadata is not None:
-        info, acl = metadata
-        os.fchown(fd, info.st_uid, info.st_gid)
-        if acl is not None:
-            os.setxattr(fd, "system.posix_acl_access", acl)
-        else:
-            try:
-                os.removexattr(fd, "system.posix_acl_access")
-            except OSError as error:
-                if not _acl_missing(error):
-                    raise
+    """Copy ownership, mode and ACL bytes, then read them back from ``fd``.
+
+    Ownership and mode come first: chown can clear set-id bits and chmod can
+    rewrite an NFSv4 ACL or a POSIX mask, so neither may follow the ACL.
+    """
+    if metadata is None:
+        os.fchmod(fd, mode)
+        return
+    for _ in ACL_ATTRIBUTES:
+        present = read_acls(fd)
+        extra = [name for name in ACL_ATTRIBUTES if name in present and name not in metadata.acls]
+        if not extra:
+            break
+        # Removing a native ACL can also remove the views derived from it.
+        os.removexattr(fd, extra[0])
+    os.fchown(fd, metadata.info.st_uid, metadata.info.st_gid)
     os.fchmod(fd, mode)
+    primary = next((name for name in ACL_ATTRIBUTES if name in metadata.acls), None)
+    if primary is not None:
+        os.setxattr(fd, primary, metadata.acls[primary])
+    restored = os.fstat(fd)
+    if (restored.st_uid, restored.st_gid, stat.S_IMODE(restored.st_mode)) != (
+        metadata.info.st_uid, metadata.info.st_gid, mode
+    ):
+        raise Refused(
+            "ownership or mode did not round-trip: expected "
+            f"{metadata.info.st_uid}:{metadata.info.st_gid} {mode:o}, found "
+            f"{restored.st_uid}:{restored.st_gid} {stat.S_IMODE(restored.st_mode):o}"
+        )
+    if read_acls(fd) != metadata.acls:
+        raise Refused("access-control attributes did not round-trip")
+
+
+def _discard(tmp, created):
+    try:
+        current = os.lstat(tmp)
+        if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+            os.unlink(tmp)
+    except OSError:
+        pass
 
 
 def atomic_write(path, data, faults, step, mode=None, metadata_from=None):
     """Replace a destination only after its bytes and access metadata are durable.
 
-    Existing files retain their ownership, mode and POSIX access ACL, including
-    the absence of an ACL. ``metadata_from`` selects a prepared permission
-    policy instead. New files without a metadata source inherit the directory's
-    default ACL. Metadata errors leave the destination unchanged.
+    Existing files retain their ownership, mode and listed ACL attributes
+    (POSIX access, generic NFSv4 and GPFS native NFSv4), including the
+    absence of an ACL. ``metadata_from`` selects a prepared permission
+    policy instead. New files without a metadata source inherit the
+    directory's default ACL. Metadata that cannot be inspected, restored
+    byte for byte, or that changes before the rename leaves the destination
+    unchanged.
 
     Fault points ``<step>.write``, ``<step>.fsync`` and ``<step>.rename``
     precede those operations. The destination is never unlinked first.
@@ -89,39 +176,53 @@ def atomic_write(path, data, faults, step, mode=None, metadata_from=None):
     if metadata_path is None and os.path.lexists(path):
         metadata_path = path
     try:
-        metadata = _metadata(metadata_path) if metadata_path is not None else None
-    except OSError as error:
+        metadata = read_metadata(metadata_path) if metadata_path is not None else None
+    except (OSError, Refused) as error:
         raise Refused(f"cannot read access metadata for {metadata_path}: {error}") from error
     if mode is None:
-        mode = stat.S_IMODE(metadata[0].st_mode) if metadata is not None else file_mode(path)
+        mode = stat.S_IMODE(metadata.info.st_mode) if metadata is not None else file_mode(path)
     tmp = os.path.join(parent, f".{os.path.basename(path)}.new")
     try:
         stale = os.lstat(tmp)
     except FileNotFoundError:
         stale = None
     if stale is not None:
-        if not stat.S_ISREG(stale.st_mode) or stale.st_uid != os.geteuid() or stale.st_nlink != 1:
+        # A privileged writer hands its temporary file to the metadata owner
+        # before a crash can interrupt it.
+        owners = {os.geteuid()} | ({metadata.info.st_uid} if metadata is not None else set())
+        if not stat.S_ISREG(stale.st_mode) or stale.st_uid not in owners or stale.st_nlink != 1:
             raise Refused(f"temporary file must be an owned regular file with one link: {tmp}")
         os.unlink(tmp)
 
     faults.reach(f"{step}.write")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    created = os.fstat(fd)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
         try:
-            _restore_metadata(fd, metadata, mode)
-        except OSError as error:
-            raise Refused(f"cannot preserve access metadata for {path}: {error}") from error
-        faults.reach(f"{step}.fsync")
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-    faults.reach(f"{step}.rename")
-    os.replace(tmp, path)
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            try:
+                _restore_metadata(fd, metadata, mode)
+            except (OSError, Refused) as error:
+                raise Refused(f"cannot preserve access metadata for {path}: {error}") from error
+            faults.reach(f"{step}.fsync")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if metadata is not None:
+            try:
+                current = read_metadata(metadata_path)
+            except (OSError, Refused) as error:
+                raise Refused(f"cannot recheck access metadata for {metadata_path}: {error}") from error
+            if not _same_metadata(current, metadata):
+                raise Refused(f"access metadata of {metadata_path} changed before {path} was replaced")
+        faults.reach(f"{step}.rename")
+        os.replace(tmp, path)
+    except Exception:
+        _discard(tmp, created)
+        raise
     fsync_dir(parent)
 
 

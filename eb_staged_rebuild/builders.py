@@ -126,6 +126,27 @@ def _signal_group(child, signum):
         pass
 
 
+def _group_running(pgid):
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[2]) == pgid and fields[0] not in (b"Z", b"X"):
+            return True
+    return False
+
+
+def _kill_group(child):
+    """SIGKILL is delivered asynchronously; a member keeps its descriptors until it exits."""
+    _signal_group(child, signal.SIGKILL)
+    while _group_running(child.pid):
+        time.sleep(0.01)
+
+
 def run_command(cmd, env, faults, step):
     """Keep the caller's lock held until the command process group has stopped.
 
@@ -137,6 +158,8 @@ def run_command(cmd, env, faults, step):
     faults.reach(step)
     if threading.current_thread() is not threading.main_thread():
         raise Refused("external build and preparation commands require the main thread")
+    if not os.path.isfile("/proc/self/stat"):
+        raise Refused("external commands require /proc to confirm their process group stopped")
     interrupted = [None]
 
     def request_stop(signum, frame):
@@ -162,7 +185,7 @@ def run_command(cmd, env, faults, step):
                 time.sleep(min(0.02, max(0, deadline - time.monotonic())))
         # The unreaped leader reserves the process-group identifier. Stray
         # workers must not retain write access beyond command completion.
-        _signal_group(child, signal.SIGKILL)
+        _kill_group(child)
         code = child.wait()
         if interrupted[0] is not None:
             return 128 + interrupted[0]
@@ -170,7 +193,7 @@ def run_command(cmd, env, faults, step):
     finally:
         try:
             if child is not None and child.returncode is None:
-                _signal_group(child, signal.SIGKILL)
+                _kill_group(child)
                 child.wait()
         finally:
             for signum, handler in handlers.items():

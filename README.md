@@ -51,6 +51,16 @@ metadata for a new installation. The finalizer can adjust the prepared
 file's access metadata; publication copies that metadata to the replacement
 before the module becomes visible. Metadata errors refuse replacement.
 Rollback restores the backed-up module's bytes and access metadata.
+ACLs are found with `listxattr` on the open file: `system.gpfs_nfs4_acl`
+(GPFS native NFSv4), `system.nfs4_acl` (generic NFSv4) and
+`system.posix_acl_access`. Their bytes are copied unchanged, never
+translated; only the most native listed name is written, after ownership
+and mode, and every listed name must read back identically. An ACL that
+cannot be listed or read, an unknown `system.*` attribute, an ACL that
+changes before the rename, or a filesystem that cannot store the same
+model refuses replacement. Prepared files and backups live under the state
+root, so it must store the live modules' ACL model. This has not been
+measured on GPFS.
 It applies and verifies the site's permissions in that generation and
 returns zero to permit publication. A nonzero exit leaves live modules
 unchanged. Every planned generation is checked after the finalizer and
@@ -65,7 +75,9 @@ terminated by a signal returns the corresponding shell exit status.
 Build and preparation commands run in a dedicated process group. SIGTERM,
 SIGINT and SIGHUP stop that group before the writer lock is released;
 workers that ignore termination are killed after a two-second grace period.
-Commands must not daemonize or move workers into other process groups.
+The lock is held until `/proc` shows every killed group member has exited
+and closed its files. Commands must not daemonize or move workers into
+other process groups.
 SIGKILL and host loss cannot run this cleanup; the scheduler must stop the
 entire job before an operator resumes interrupted work.
 
