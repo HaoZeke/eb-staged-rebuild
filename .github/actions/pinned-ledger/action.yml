@@ -1,0 +1,18 @@
+name: pinned ledger CLI
+description: Build the immutable ledger implementation used by integration tests.
+runs:
+  using: composite
+  steps:
+    - name: build ledger CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        ledger_source="$RUNNER_TEMP/ledger-cli-ff2e14b"
+        archive="$RUNNER_TEMP/ledger-cli-ff2e14b.tar.gz"
+        curl -fsSL --retry 2 --connect-timeout 15 https://codeload.github.com/HaoZeke/eb-stack/tar.gz/ff2e14b64ad2f9ab3376fb3b0bdf7b21f6413015 -o "$archive"
+        printf '%s  %s\n' c90894e9f7320c1124622b06b30aab775921993aa29d554eee11e38466d3dca3 "$archive" | sha256sum --check -
+        mkdir "$ledger_source"
+        tar -xzf "$archive" --strip-components=1 -C "$ledger_source"
+        rustup toolchain install 1.88.0 --profile minimal
+        cargo +1.88.0 build --manifest-path "$ledger_source/Cargo.toml" --locked --release --bin eb-stack
+        printf 'EB_STACK_BIN=%s\n' "$ledger_source/target/release/eb-stack" >> "$GITHUB_ENV"
