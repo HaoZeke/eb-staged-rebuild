@@ -86,6 +86,13 @@ entire job before an operator resumes interrupted work.
 Journals use schema 2 so a reader that lacks preparation support refuses
 them. Schema 1 remains readable, and each journal write upgrades its schema.
 
+Ledger publication uses journal schema 3, which publishers without ledger
+support refuse. The normalized configuration is frozen before building;
+resume and rollback refuse a changed policy, including actor, target,
+required delivery, log and signing paths. Restore the recorded configuration
+to continue. A ledger journal without a recorded policy requires inspection.
+Runs without ledger recording retain schema 2.
+
 Publication events can be recorded in an eb-stack ledger:
 
 ```bash

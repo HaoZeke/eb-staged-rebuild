@@ -7,6 +7,7 @@ from eb_staged_rebuild.atomicio import atomic_write, read_bytes
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 
 SCHEMA = 2
+LEDGER_SCHEMA = 3
 
 
 def journal_path(state_root, run_id):
@@ -22,7 +23,7 @@ def generation_root(state_root, run_id):
 
 
 def save_journal(path, data, faults, step):
-    data["schema"] = SCHEMA
+    data["schema"] = LEDGER_SCHEMA if data.get("ledger_config") else SCHEMA
     raw = json.dumps(data, indent=2, sort_keys=True).encode("utf-8") + b"\n"
     atomic_write(path, raw, faults, step)
 
@@ -34,8 +35,10 @@ def load_journal(path):
         data = json.loads(read_bytes(path).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise NeedsIntervention(f"journal cannot be read: {path}: {exc}") from exc
-    if data.get("schema") not in (1, SCHEMA):
-        raise NeedsIntervention(f"journal schema {data.get('schema')!r} is not supported (1 or {SCHEMA})")
+    if data.get("schema") not in (1, SCHEMA, LEDGER_SCHEMA):
+        raise NeedsIntervention(
+            f"journal schema {data.get('schema')!r} is not supported (1, {SCHEMA} or {LEDGER_SCHEMA})"
+        )
     return data
 
 

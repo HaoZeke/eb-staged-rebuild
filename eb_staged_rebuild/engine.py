@@ -75,6 +75,7 @@ class Spec:
     probes: dict = None
     prepare_executable: str = None
     ledger_config: str = None
+    ledger_policy: dict = None
 
 
 @dataclass
@@ -574,7 +575,14 @@ def _prepare_publication(spec, journal, faults):
 
 def _publisher(journal):
     path = journal.get("ledger_config")
-    return EbStackLedger(load_config(path)) if path else None
+    if not path:
+        return None
+    policy = journal.get("ledger_policy")
+    if policy is None:
+        raise Refused("ledger policy is missing from the journal; inspect the publication before resuming")
+    if load_config(path) != policy:
+        raise Refused("ledger policy changed; restore the recorded configuration before resuming")
+    return EbStackLedger(policy)
 
 
 def _record(journal, faults, publisher, records, step):
@@ -659,6 +667,7 @@ def _blank_journal(spec, run_id, probes, rels):
         "skip_live_check": spec.skip_live_check,
         "prepare_executable": spec.prepare_executable,
         "ledger_config": spec.ledger_config,
+        "ledger_policy": spec.ledger_policy,
         "prepare_complete": False,
         "prepare_returncode": None,
         "module_rels": rels,
@@ -680,7 +689,8 @@ def run(spec):
     """Build into a new generation, then publish by replacing module files."""
     _check_roots(spec)
     if spec.ledger_config is not None:
-        spec.ledger_config = load_config(spec.ledger_config)["path"]
+        spec.ledger_policy = load_config(spec.ledger_config)
+        spec.ledger_config = spec.ledger_policy["path"]
     faults = _faults(spec)
     probes = spec.probes if spec.probes is not None else probe_all(spec.software, spec.eb_executable)
     if spec.dry_run:
@@ -725,6 +735,7 @@ def _spec_from_journal(journal, builder, faults, clock, lock_timeout):
         probes=journal.get("probes"),
         prepare_executable=journal.get("prepare_executable"),
         ledger_config=journal.get("ledger_config"),
+        ledger_policy=journal.get("ledger_policy"),
     )
 
 
