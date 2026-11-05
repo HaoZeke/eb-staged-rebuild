@@ -45,7 +45,12 @@ eb-staged-rebuild run --prepare /absolute/path/to/finalize-permissions -- file.e
 
 The executable receives one argument: a JSON file naming the generation,
 state and live roots, staged software and module roots, and each module's
-software directory.
+software directory and prepared module file. The prepared file inherits
+the existing module's ownership, mode and access ACL, or the staged module's
+metadata for a new installation. The finalizer can adjust the prepared
+file's access metadata; publication copies that metadata to the replacement
+before the module becomes visible. Metadata errors refuse replacement.
+Rollback restores the backed-up module's bytes and access metadata.
 It applies and verifies the site's permissions in that generation and
 returns zero to permit publication. A nonzero exit leaves live modules
 unchanged. Every planned generation is checked after the finalizer and

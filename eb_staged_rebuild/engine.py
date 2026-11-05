@@ -297,13 +297,14 @@ def _plan(spec, journal, faults):
             raise Refused(reason)
         if lstat_kind(live_module) not in ("missing", "file"):
             raise Refused(f"{live_module} is not a regular file")
-        drafted.append((rel, generation, new_text, live_module))
+        drafted.append((rel, generation, new_text, live_module, path))
 
     run_dir = run_dir_for(spec.state_root, journal["run_id"])
     plan = []
-    for rel, generation, new_text, live_module in drafted:
+    for rel, generation, new_text, live_module, staged_module in drafted:
         prepared = os.path.join(run_dir, "prepared", rel)
-        atomic_write(prepared, new_text, faults, f"prepare:{rel}")
+        metadata_source = live_module if lstat_kind(live_module) == "file" else staged_module
+        atomic_write(prepared, new_text, faults, f"prepare:{rel}", metadata_from=metadata_source)
         stamp = {
             "run_id": journal["run_id"],
             "generation": generation,
@@ -376,7 +377,7 @@ def _publish_one(mod, faults, clock):
             )
         backup = mod["backup"]
         if lstat_kind(backup) == "missing":
-            atomic_write(backup, current, faults, f"publish.backup:{mod['rel']}")
+            atomic_write(backup, current, faults, f"publish.backup:{mod['rel']}", metadata_from=live)
         elif lstat_kind(backup) != "file" or sha256_bytes(read_bytes(backup)) != mod["old_hash"]:
             raise NeedsIntervention(f"backup for {mod['rel']} does not match the previous module file")
     elif kind == "missing":
@@ -384,7 +385,7 @@ def _publish_one(mod, faults, clock):
             raise NeedsIntervention(f"{live} disappeared before it could be published")
     else:
         raise Refused(f"{live} is not a regular file")
-    atomic_write(live, prepared, faults, f"publish.file:{mod['rel']}")
+    atomic_write(live, prepared, faults, f"publish.file:{mod['rel']}", metadata_from=mod["prepared"])
     mod["status"] = "published"
     mod["published_at"] = clock()
 
@@ -539,7 +540,7 @@ def _prepare_publication(spec, journal, faults):
         "stage_software": journal["stage_software"],
         "stage_modules": journal["stage_modules"],
         "modules": [
-            {key: mod[key] for key in ("rel", "generation", "live_module")}
+            {key: mod[key] for key in ("rel", "generation", "live_module", "prepared")}
             for mod in journal["modules_plan"]
         ],
     }
@@ -734,7 +735,7 @@ def _restore_one(mod, faults):
             )
         if kind not in ("file", "missing"):
             raise Refused(f"{live} is not a regular file")
-        atomic_write(live, previous, faults, f"rollback.file:{mod['rel']}")
+        atomic_write(live, previous, faults, f"rollback.file:{mod['rel']}", metadata_from=backup)
         mod["status"] = "restored"
         return
     if kind == "missing":
