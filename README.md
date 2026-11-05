@@ -62,6 +62,12 @@ publication. A completed finalizer is not repeated while resuming module
 publication. A finalizer failure retains the built generation, so retrying
 does not repeat EasyBuild. An empty finalizer argument is refused. A child
 terminated by a signal returns the corresponding shell exit status.
+Build and preparation commands run in a dedicated process group. SIGTERM,
+SIGINT and SIGHUP stop that group before the writer lock is released;
+workers that ignore termination are killed after a two-second grace period.
+Commands must not daemonize or move workers into other process groups.
+SIGKILL and host loss cannot run this cleanup; the scheduler must stop the
+entire job before an operator resumes interrupted work.
 
 Journals use schema 2 so a reader that lacks preparation support refuses
 them. Schema 1 remains readable, and each journal write upgrades its schema.
