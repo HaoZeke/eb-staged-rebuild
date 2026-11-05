@@ -157,14 +157,20 @@ class AclModelTests(unittest.TestCase):
                 model.hooks.clear()
                 self.assert_unchanged(model, path, expected)
 
-    def test_readable_but_unlisted_native_acl_is_refused(self):
+    def test_readable_virtual_acl_is_preserved_when_listing_is_empty(self):
         for model in models():
             with self.scenario(model) as (path, expected):
+                info = path.stat()
                 model.hooks["listxattr"] = only(path, lambda fd, name: [])
-                with self.assertRaisesRegex(Refused, "did not list it"):
-                    atomic_write(path, "new", None, "replace")
+                atomic_write(path, "new", None, "replace")
                 model.hooks.clear()
-                self.assert_unchanged(model, path, expected)
+                self.assertEqual(path.read_text(), "new")
+                self.assertEqual(model.get_path(path), expected)
+                self.assertEqual(model.get_path(path)[model.native], OPAQUE)
+                restored = path.stat()
+                self.assertEqual((restored.st_uid, restored.st_gid, stat.S_IMODE(restored.st_mode)),
+                                 (info.st_uid, info.st_gid, 0o640))
+                self.assertFalse((path.parent / ".module.lua.new").exists())
 
     def test_unknown_system_attribute_is_refused(self):
         for model in models():
