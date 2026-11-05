@@ -24,6 +24,7 @@ delete outside ``generations/``.
 """
 
 import os
+import stat
 import time
 
 from eb_staged_rebuild.atomicio import read_bytes
@@ -32,15 +33,18 @@ from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.journal import journal_path, list_journals, save_journal
 from eb_staged_rebuild.lockfile import FileLock
 from eb_staged_rebuild.modulefile import parse_root
-from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
+from eb_staged_rebuild.paths import abspath, is_within
 from eb_staged_rebuild.retire import is_retire
 
 
 def _live_root(path):
-    kind = lstat_kind(path)
-    if kind == "missing":
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
         return None
-    if kind != "file":
+    except OSError as error:
+        raise Refused(f"cannot inspect live module {path}: {error}") from error
+    if not stat.S_ISREG(mode):
         raise Refused(f"cannot determine live references from a non-regular module: {path}")
     try:
         _syntax, root = parse_root(read_bytes(path).decode("utf-8"))
@@ -49,6 +53,13 @@ def _live_root(path):
     if not root:
         raise Refused(f"cannot determine the live software root from {path}")
     return abspath(root)
+
+
+def _resolved_root(path):
+    try:
+        return os.path.realpath(path, strict=True)
+    except OSError as error:
+        raise Refused(f"cannot resolve live software references from {path}: {error}") from error
 
 
 def _live_roots(journals):
@@ -62,15 +73,13 @@ def _live_roots(journals):
             root = _live_root(path)
             if root:
                 roots.add(root)
+                roots.add(_resolved_root(root))
     return roots
 
 
 def _referenced(generation, roots):
-    generation = abspath(generation)
-    for root in roots:
-        if root == generation or is_within(root, generation):
-            return True
-    return False
+    spellings = {abspath(generation), _resolved_root(generation)}
+    return any(is_within(root, spelling) for root in roots for spelling in spellings)
 
 
 def _superseded_at(journal, journals):
