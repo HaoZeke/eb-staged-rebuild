@@ -7,8 +7,10 @@ from eb_staged_rebuild.errors import Refused
 from eb_staged_rebuild.paths import abspath, is_within
 
 
-def _open_owned_directory(parent, name):
+def _open_owned_directory(parent, name, device):
     info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if info.st_dev != device:
+        raise Refused(f"cleanup refuses a different filesystem: {name}")
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
         raise Refused(f"cleanup requires an owned real directory: {name}")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -32,7 +34,7 @@ def _empty(fd, device):
     for name in names:
         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode):
-            child = _open_owned_directory(fd, name)
+            child = _open_owned_directory(fd, name, device)
             try:
                 if os.fstat(child).st_dev != device:
                     raise Refused(f"cleanup refuses a different filesystem: {name}")
@@ -51,7 +53,7 @@ def remove_generation_tree(path, boundary):
     parent = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         name = os.path.basename(path)
-        fd = _open_owned_directory(parent, name)
+        fd = _open_owned_directory(parent, name, os.fstat(parent).st_dev)
         try:
             _empty(fd, os.fstat(fd).st_dev)
         finally:
