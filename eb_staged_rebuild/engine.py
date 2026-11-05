@@ -410,7 +410,29 @@ def _create_links(journal, faults):
         link["status"] = "created"
 
 
+def _validate_publication_set(journal):
+    for mod in journal["modules_plan"]:
+        try:
+            prepared = read_bytes(mod["prepared"])
+            if sha256_bytes(prepared) != mod["new_hash"]:
+                raise NeedsIntervention(f"prepared module bytes for {mod['rel']} changed")
+            if not generation_complete(mod["generation"]):
+                raise Refused(f"refusing to publish an incomplete generation {mod['generation']}")
+            live = mod["live_module"]
+            kind = lstat_kind(live)
+            if kind == "file":
+                if sha256_bytes(read_bytes(live)) not in (mod["old_hash"], mod["new_hash"]):
+                    raise NeedsIntervention(f"live module bytes for {mod['rel']} changed")
+            elif kind == "missing" and not mod["existed"]:
+                continue
+            else:
+                raise Refused(f"live module path is not publishable: {live} ({kind})")
+        except OSError as exc:
+            raise Refused(f"cannot validate publication for {mod['rel']}: {exc}") from exc
+
+
 def _publish(spec, journal, faults):
+    _validate_publication_set(journal)
     journal["state"] = "publishing"
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.publishing")
     clock = _clock(spec)
@@ -510,6 +532,9 @@ def _prepare_publication(spec, journal, faults):
     context = {
         "run_id": journal["run_id"],
         "generation_root": journal["generation_root"],
+        "state_root": spec.state_root,
+        "live_software": spec.software,
+        "live_modules": spec.modules,
         "stage_software": journal["stage_software"],
         "stage_modules": journal["stage_modules"],
         "modules": [
@@ -527,6 +552,11 @@ def _prepare_publication(spec, journal, faults):
     journal["prepare_returncode"] = rc
     if rc != 0:
         return _preparation_failure(spec, journal, faults, f"publication preparation exited {rc}; live modules were not changed", rc)
+    try:
+        _validate_publication_set(journal)
+    except (Refused, NeedsIntervention) as exc:
+        return _preparation_failure(spec, journal, faults, str(exc), 2)
+    journal["message"] = ""
     journal["prepare_complete"] = True
     save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.prepared")
     return 0

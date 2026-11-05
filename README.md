@@ -44,10 +44,13 @@ eb-staged-rebuild run --prepare /absolute/path/to/finalize-permissions -- file.e
 ```
 
 The executable receives one argument: a JSON file naming the generation,
-staged software and module roots, and each module's software directory.
+state and live roots, staged software and module roots, and each module's
+software directory.
 It applies and verifies the site's permissions in that generation and
 returns zero to permit publication. A nonzero exit leaves live modules
-unchanged. The finalizer runs outside the EasyBuild sandbox. It must be
+unchanged. Every planned generation is checked after the finalizer and
+before any module is published; an incomplete or unreadable generation
+prevents the first publication. The finalizer runs outside the EasyBuild sandbox. It must be
 idempotent because a crash can require repeating it. Its path and result
 are retained in the run journal; resume runs an unfinished finalizer before
 publication. A completed finalizer is not repeated while resuming module
