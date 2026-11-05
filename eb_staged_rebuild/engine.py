@@ -305,7 +305,7 @@ def _plan(spec, journal, faults):
             "sha256": sha256_bytes(new_text.encode("utf-8")),
         }
         atomic_write(
-            os.path.join(generation, ".eb-staged-rebuild-complete"),
+            os.path.join(run_dir, "stamps", rel + ".json"),
             json.dumps(stamp, indent=2, sort_keys=True) + "\n",
             faults,
             f"stamp:{rel}",

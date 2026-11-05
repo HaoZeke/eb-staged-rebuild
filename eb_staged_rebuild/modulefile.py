@@ -88,7 +88,7 @@ def generation_complete(path):
 
     * ``PAYLOAD`` (used by the fault-injection tests)
     * ``easybuild/*.eb`` (EasyBuild copies the easyconfig in at the end of a build)
-    * ``.eb-staged-rebuild-complete`` (written by this tool before it publishes)
+    * ``.eb-staged-rebuild-complete`` (an explicit completion marker)
     """
     from eb_staged_rebuild.paths import is_real_dir, lstat_kind
 
