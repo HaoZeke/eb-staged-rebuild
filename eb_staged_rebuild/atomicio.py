@@ -53,38 +53,33 @@ def _listed_acls(fd):
     return names
 
 
-def _read_listed(fd):
+def _read_all_acls(fd):
+    listed = _listed_acls(fd)
     acls = {}
-    for name in sorted(_listed_acls(fd)):
+    for name in ACL_ATTRIBUTES:
         try:
             acls[name] = os.getxattr(fd, name)
         except OSError as error:
-            if error.errno in _NO_DATA:
-                raise Refused(f"{name} was listed but is no longer readable") from error
-            raise
+            if name in listed:
+                if error.errno in _NO_DATA:
+                    raise Refused(f"{name} was listed but is no longer readable") from error
+                raise
+            if error.errno not in _NOT_PROVIDED:
+                raise
     return acls
 
 
 def read_acls(fd):
-    """Return every listed ACL attribute of an open regular file as opaque bytes.
+    """Read listed and virtual ACLs through one regular-file descriptor.
 
-    A listed attribute that cannot be read, an ACL name that reads back
-    without being listed, and any change while inspecting are refusals.
-    The second pass catches changes inside one ctime tick.
+    GPFS can expose system.nfs4_acl through getxattr without listing it.
+    Every known ACL name is probed; denied inspection and metadata changes
+    refuse replacement. Two complete passes protect the snapshot within
+    one ctime tick.
     """
     before = os.fstat(fd)
-    acls = _read_listed(fd)
-    for name in ACL_ATTRIBUTES:
-        if name in acls:
-            continue
-        try:
-            os.getxattr(fd, name)
-        except OSError as error:
-            if error.errno in _NOT_PROVIDED:
-                continue
-            raise
-        raise Refused(f"{name} is readable but listxattr did not list it")
-    if _read_listed(fd) != acls or _identity(os.fstat(fd)) != _identity(before):
+    acls = _read_all_acls(fd)
+    if _read_all_acls(fd) != acls or _identity(os.fstat(fd)) != _identity(before):
         raise Refused("access metadata changed during inspection")
     return acls
 
@@ -95,7 +90,10 @@ def read_metadata(path):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise Refused(f"metadata source is not a regular file: {path}")
-        return Metadata(info, read_acls(fd))
+        acls = read_acls(fd)
+        if _identity(os.fstat(fd)) != _identity(info):
+            raise Refused("access metadata changed during inspection")
+        return Metadata(info, acls)
     finally:
         os.close(fd)
 

@@ -51,16 +51,18 @@ metadata for a new installation. The finalizer can adjust the prepared
 file's access metadata; publication copies that metadata to the replacement
 before the module becomes visible. Metadata errors refuse replacement.
 Rollback restores the backed-up module's bytes and access metadata.
-ACLs are found with `listxattr` on the open file: `system.gpfs_nfs4_acl`
+ACLs are inspected with `listxattr` and direct descriptor probes: `system.gpfs_nfs4_acl`
 (GPFS native NFSv4), `system.nfs4_acl` (generic NFSv4) and
 `system.posix_acl_access`. Their bytes are copied unchanged, never
 translated; only the most native listed name is written, after ownership
 and mode, and every listed name must read back identically. An ACL that
-cannot be listed or read, an unknown `system.*` attribute, an ACL that
+cannot be inspected, an unknown `system.*` attribute, an ACL that
 changes before the rename, or a filesystem that cannot store the same
-model refuses replacement. Prepared files and backups live under the state
-root, so it must store the live modules' ACL model. This has not been
-measured on GPFS.
+model refuses replacement. GPFS can return a virtual `system.nfs4_acl`
+even when `listxattr` is empty; the known names are always probed and the
+complete metadata snapshot is read twice. Prepared files and backups live
+under the state root, so it must store the live modules' ACL model. Native
+replacement and rollback still require filesystem-specific verification.
 It applies and verifies the site's permissions in that generation and
 returns zero to permit publication. A nonzero exit leaves live modules
 unchanged. Every planned generation is checked after the finalizer and
