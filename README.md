@@ -101,6 +101,9 @@ Drop `--dry-run` to move the file. `rollback` with the printed `retire-<timestam
 references and removing a retired generation. It restores owner permissions
 only inside the owned generation and unlinks symbolic links without following
 their targets, so sealed EasyBuild directories can be removed safely.
+An unreadable, undecodable or unrecognized tracked live module refuses
+collection before any generation is removed. A missing module is distinct
+from a reference that cannot be inspected.
 
 The operator notes are in [docs/runbook.md](docs/runbook.md). The choice of design is in [DESIGN.md](DESIGN.md).
 

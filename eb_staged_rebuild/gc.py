@@ -36,31 +36,32 @@ from eb_staged_rebuild.paths import abspath, is_within, lstat_kind
 from eb_staged_rebuild.retire import is_retire
 
 
+def _live_root(path):
+    kind = lstat_kind(path)
+    if kind == "missing":
+        return None
+    if kind != "file":
+        raise Refused(f"cannot determine live references from a non-regular module: {path}")
+    try:
+        _syntax, root = parse_root(read_bytes(path).decode("utf-8"))
+    except (OSError, UnicodeError) as error:
+        raise Refused(f"cannot read live references from {path}: {error}") from error
+    if not root:
+        raise Refused(f"cannot determine the live software root from {path}")
+    return abspath(root)
+
+
 def _live_roots(journals):
     roots = set()
     for journal in journals:
         if is_retire(journal):
-            # A retire that is not complete, or that was rolled back, leaves the
-            # module file live at its original path.
-            if journal.get("state") != "retired" and lstat_kind(journal["module_path"]) == "file":
-                try:
-                    _syntax, root = parse_root(read_bytes(journal["module_path"]).decode("utf-8"))
-                except (OSError, UnicodeError):
-                    continue
-                if root:
-                    roots.add(abspath(root))
-            continue
-        for mod in journal.get("modules_plan") or []:
-            live = mod.get("live_module")
-            if not live or lstat_kind(live) != "file":
-                continue
-            try:
-                text = read_bytes(live).decode("utf-8")
-            except (OSError, UnicodeError):
-                continue
-            _syntax, root = parse_root(text)
+            paths = [journal["module_path"]]
+        else:
+            paths = [mod["live_module"] for mod in journal.get("modules_plan") or []]
+        for path in paths:
+            root = _live_root(path)
             if root:
-                roots.add(abspath(root))
+                roots.add(root)
     return roots
 
 
