@@ -44,8 +44,14 @@ the documented fallback is acceptable.
 
 `--eb` selects the EasyBuild executable (environment `EB_STAGED_REBUILD_EB`,
 default `eb`). `--run-id` names the journal instead of the generated id.
-`--lock-timeout` is how long to wait for `<state-root>/.lock`, in seconds;
-omitted, the wait has no deadline, and `retire` defaults to 0. `--module`
+`--lock-timeout` is how long to wait for `<state-root>/.lock` and its POSIX
+record-lock sidecar `<state-root>/.lock.posix`, in seconds; omitted, the wait
+has no deadline, and `retire` defaults to 0. A 0.2.0 flock-only process does
+not take the sidecar. `--prepare` names an executable that receives a
+directory-swap context JSON before the live directory is exchanged.
+`--ledger-config` names a JSON eb-stack ledger configuration; `started`
+records are acknowledged before the swap, and the stable
+`software/<name>/<version>` path is the record's `location`. `--module`
 names a `Name/version` to publish when EasyBuild's dry-run does not.
 `--skip-live-check` skips the before/after content record of the live install.
 `gc --include-failed` also removes the hidden sibling recorded for a failed

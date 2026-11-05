@@ -76,10 +76,22 @@ observe a mixed set while a successful multi-module transaction is in flight.
 
 ## Lock, resume, rollback, and collection
 
-One `flock` on `<state-root>/.lock` covers build, publish, resume, rollback,
-garbage collection, and their journal changes. It serialises processes that
-observe the same lock implementation. Cross-node coherence remains an
-`open-004` measurement.
+A local `flock` on `<state-root>/.lock` is taken first, and then a POSIX
+record lock on the distinct sidecar `<state-root>/.lock.posix`. The gate
+excludes threads and processes that share a kernel. The sidecar excludes
+other nodes only when the filesystem provides coherent POSIX locks. The
+sidecar is opened only while the gate is held and closed before the gate is
+released. Other code in the same process must not open the sidecar: closing
+any descriptor for that inode drops the process's record locks. Forked
+children close inherited descriptors without unlocking the parent. Never
+unlink either file while the state root is active.
+
+Every node must use this protocol. A flock-only publisher (0.2.0) still
+excludes this process on the same kernel, and it does not take the sidecar,
+so the two versions do not exclude each other across nodes. Drain flock-only
+holders before relying on cross-node exclusion. Cross-node coherence and
+failed-node recovery remain an `open-004` measurement; this repository has
+not measured GPFS.
 
 The journal records the stage, stable path, retired path, hashes, and completed
 steps. `resume` is idempotent. It first recovers an interrupted fallback and
@@ -107,7 +119,16 @@ write a module file.
   (`ns-054`).
 * A process killed with `SIGKILL` during the ordinary-rename fallback cannot
   execute in-process rollback. The next `resume` repairs the journaled state.
-* `flock` coherence across two build nodes is not assumed.
+* The dual lock's coherence across two build nodes is not assumed. GPFS was
+  not measured.
+* A module-file replacement keeps the destination's ownership, mode, and
+  listed ACL bytes (POSIX access, generic NFSv4, GPFS native NFSv4) when
+  those attributes can be read back unchanged. A filesystem that was not
+  measured here, including GPFS, is not claimed to preserve them.
+* Optional `--ledger-config` appends eb-stack ledger records whose `location`
+  is the stable directory. The journal schema for that run is 4. Schema 1 and
+  schema 3 are generation-pointer journals and are refused. Schema 2 remains
+  a directory swap without a ledger.
 * The unsandboxed fallback cannot constrain arbitrary EasyBuild hooks.
 * Neither `gc` nor the grace period can see open files on every cluster node.
 * A successful transaction is atomic per directory, not across several module

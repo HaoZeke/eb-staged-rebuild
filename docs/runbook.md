@@ -17,7 +17,10 @@ Interpret it locally:
 * `user-namespace sandbox: usable` means `unshare` created a user/mount
   namespace and a test bind mount rejected writes with `EROFS`.
 * `RENAME_EXCHANGE: yes` applies only to the probed filesystem.
-* `flock across nodes: unmeasured` is deliberate. Test two actual build nodes.
+* `lock: flock gate plus POSIX record lock; cross-node coherence unmeasured (open-004)`
+  is deliberate. The sidecar is `<state-root>/.lock.posix`. Test two actual
+  build nodes with this protocol. A flock-only 0.2.0 publisher does not
+  participate in the sidecar. Do not unlink either lock file.
 * Pin EasyBuild to the version shown by the probe; 5.4.2 is the tested target.
 
 Put `--state-root` beside the software tree so moving the completed stage to a
