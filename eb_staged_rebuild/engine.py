@@ -49,6 +49,9 @@ from eb_staged_rebuild.probe import probe_all, stage_paths_from_bwrap_info
 
 import re
 
+from eb_staged_rebuild import outbox
+from eb_staged_rebuild.ledger_adapter import EbStackLedger, load_config, publication_records
+
 _MODULE_LINE = re.compile(r"^\s*\*\s+\[[ xFR-]\]\s+.*\(module:\s*(.+)\)\s*$")
 
 
@@ -71,6 +74,7 @@ class Spec:
     clock: object = None
     probes: dict = None
     prepare_executable: str = None
+    ledger_config: str = None
 
 
 @dataclass
@@ -568,6 +572,56 @@ def _prepare_publication(spec, journal, faults):
     return 0
 
 
+def _publisher(journal):
+    path = journal.get("ledger_config")
+    return EbStackLedger(load_config(path)) if path else None
+
+
+def _record(journal, faults, publisher, records, step):
+    """Queue ``records`` durably, then deliver every pending event in order."""
+    run_dir = run_dir_for(journal["state_root"], journal["run_id"])
+    if records:
+        outbox.enqueue(run_dir, records, faults, step)
+    return outbox.deliver(run_dir, publisher, faults)
+
+
+def _pending_message(left):
+    return f"{len(left)} ledger event(s) not acknowledged ({left[0]['error']}); run resume"
+
+
+def _publish_recorded(spec, journal, faults):
+    """Publish only after the ledger acknowledges every started record."""
+    rc = _prepare_publication(spec, journal, faults)
+    if rc != 0:
+        return Result(rc, journal["run_id"], "failed", journal["message"], _command_text(journal))
+    publisher = _publisher(journal)
+    if publisher is not None:
+        _validate_publication_set(journal)
+        started = publication_records(publisher.config, journal, "started", _clock(spec)())
+        left = _record(journal, faults, publisher, started, "outbox.started")
+        if left and publisher.required:
+            journal["message"] = "live modules were not changed: " + _pending_message(left)
+            save_journal(journal_path(spec.state_root, journal["run_id"]), journal, faults, "journal.ledger_pending")
+            _log(journal["message"])
+            return Result(outbox.PENDING_EXIT, journal["run_id"], journal["state"], journal["message"], _command_text(journal))
+    _publish(spec, journal, faults)
+    message = f"run {journal['run_id']} published {len(journal['modules_plan'])} module(s)"
+    _log(message)
+    return _record_finished(spec, journal, faults, publisher, message)
+
+
+def _record_finished(spec, journal, faults, publisher, message):
+    if publisher is not None:
+        finished = publication_records(publisher.config, journal, "finished", _clock(spec)())
+        left = _record(journal, faults, publisher, finished, "outbox.finished")
+        if left:
+            message = f"{message}; {_pending_message(left)}"
+            _log(message)
+            return Result(outbox.PENDING_EXIT, journal["run_id"], "complete", message, _command_text(journal))
+    return Result(0, journal["run_id"], "complete", message, _command_text(journal))
+
+
+
 def _run_locked(spec, faults, journal, fresh_build):
     path = journal_path(spec.state_root, journal["run_id"])
     if fresh_build:
@@ -585,13 +639,7 @@ def _run_locked(spec, faults, journal, fresh_build):
         journal["state"] = "built"
         journal["updated_at"] = _clock(spec)()
         save_journal(path, journal, faults, "journal.built")
-    rc = _prepare_publication(spec, journal, faults)
-    if rc != 0:
-        return Result(rc, journal["run_id"], "failed", journal["message"], _command_text(journal))
-    _publish(spec, journal, faults)
-    message = f"run {journal['run_id']} published {len(journal['modules_plan'])} module(s)"
-    _log(message)
-    return Result(0, journal["run_id"], "complete", message, _command_text(journal))
+    return _publish_recorded(spec, journal, faults)
 
 
 def _blank_journal(spec, run_id, probes, rels):
@@ -610,6 +658,7 @@ def _blank_journal(spec, run_id, probes, rels):
         "grace_hours": spec.grace_hours,
         "skip_live_check": spec.skip_live_check,
         "prepare_executable": spec.prepare_executable,
+        "ledger_config": spec.ledger_config,
         "prepare_complete": False,
         "prepare_returncode": None,
         "module_rels": rels,
@@ -630,6 +679,8 @@ def _blank_journal(spec, run_id, probes, rels):
 def run(spec):
     """Build into a new generation, then publish by replacing module files."""
     _check_roots(spec)
+    if spec.ledger_config is not None:
+        spec.ledger_config = load_config(spec.ledger_config)["path"]
     faults = _faults(spec)
     probes = spec.probes if spec.probes is not None else probe_all(spec.software, spec.eb_executable)
     if spec.dry_run:
@@ -673,6 +724,7 @@ def _spec_from_journal(journal, builder, faults, clock, lock_timeout):
         clock=clock,
         probes=journal.get("probes"),
         prepare_executable=journal.get("prepare_executable"),
+        ledger_config=journal.get("ledger_config"),
     )
 
 
@@ -692,7 +744,7 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
         if state == "complete":
             message = f"run {run_id} is already complete"
             _log(message)
-            return Result(0, run_id, state, message, _command_text(journal))
+            return _record_finished(spec, journal, faults, _publisher(journal), message)
         if state == "rolled_back":
             raise Refused(f"run {run_id} was rolled back; start a new run")
         if state in ("created", "building", "failed"):
@@ -704,13 +756,7 @@ def resume(state_root, run_id, builder=None, faults=None, clock=None, lock_timeo
             return _run_locked(spec, faults, journal, fresh_build=True)
         if state in ("built", "publishing"):
             _log(f"resume {run_id} from {state}: publishing")
-            rc = _prepare_publication(spec, journal, faults)
-            if rc != 0:
-                return Result(rc, run_id, "failed", journal["message"], _command_text(journal))
-            _publish(spec, journal, faults)
-            message = f"run {run_id} published {len(journal['modules_plan'])} module(s)"
-            _log(message)
-            return Result(0, run_id, "complete", message, _command_text(journal))
+            return _publish_recorded(spec, journal, faults)
         raise NeedsIntervention(f"run {run_id} is in an unknown state {state}")
     finally:
         lock.release()
@@ -766,12 +812,38 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
             from eb_staged_rebuild.retire import rollback_retire
 
             return rollback_retire(state_root, journal, faults, now)
+        publisher = _publisher(journal)
+        finished = {}
+        started = False
+        if publisher is not None:
+            left = _record(journal, faults, publisher, [], None)
+            if left and publisher.required:
+                message = f"run {run_id} was not rolled back: {_pending_message(left)}"
+                _log(message)
+                return Result(outbox.PENDING_EXIT, run_id, journal["state"], message)
+            events = outbox.load(run_dir_for(state_root, run_id))["events"]
+            finished = {
+                event["record"]["build"]["module_file"]: event["receipt"]["id"]
+                for event in events
+                if event["status"] == "acknowledged"
+                and event["record"]["action"] != "correction"
+                and event["record"]["stage"] == "finished"
+            }
+            started = any(event["record"]["stage"] == "started" for event in events)
+
         if journal["state"] == "rolled_back" and all(
             mod.get("status") == "restored" for mod in journal.get("modules_plan") or []
         ):
             message = f"run {run_id} is already rolled back"
             _log(message)
-            return Result(0, run_id, "rolled_back", message)
+            return _record_rollback(journal, faults, publisher, finished, started, now, message)
+        if finished:
+            records = publication_records(publisher.config, journal, "started", now(), corrects=finished)
+            left = _record(journal, faults, publisher, records, "outbox.rollback_started")
+            if left and publisher.required:
+                message = f"run {run_id} was not rolled back: {_pending_message(left)}"
+                _log(message)
+                return Result(outbox.PENDING_EXIT, run_id, journal["state"], message)
         for link in journal.get("links_plan") or []:
             if not link.get("created"):
                 continue
@@ -791,10 +863,27 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
         save_journal(path, journal, faults, "journal.rolled_back")
         message = f"run {run_id} rolled back; generation kept at {journal['generation_root']}"
         _log(message)
-        return Result(0, run_id, "rolled_back", message)
+        return _record_rollback(journal, faults, publisher, finished, started, now, message)
     finally:
         lock.release()
 
+
+def _record_rollback(journal, faults, publisher, finished, started, now, message):
+    """After the restore: finish the correction, or abort a publication that never finished."""
+    if publisher is None:
+        return Result(0, journal["run_id"], "rolled_back", message)
+    if finished:
+        records = publication_records(publisher.config, journal, "finished", now(), corrects=finished)
+    elif started:
+        records = publication_records(publisher.config, journal, "aborted", now())
+    else:
+        records = []
+    left = _record(journal, faults, publisher, records, "outbox.rollback_finished")
+    if left:
+        message = f"{message}; {_pending_message(left)}"
+        _log(message)
+        return Result(outbox.PENDING_EXIT, journal["run_id"], "rolled_back", message)
+    return Result(0, journal["run_id"], "rolled_back", message)
 
 def _dry_run(spec, probes, faults):
     bwrap = probes.get("bwrap") or {}

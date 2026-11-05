@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from eb_staged_rebuild import __version__
+from eb_staged_rebuild import __version__, outbox
 from eb_staged_rebuild.engine import Spec, describe_module, resume, rollback, run
 from eb_staged_rebuild.errors import NeedsIntervention, Refused, StagedRebuildError
 from eb_staged_rebuild.gc import collect
@@ -70,6 +70,7 @@ def _parser():
     run_p.add_argument("--module", action="append", default=[], dest="module_rels", metavar="NAME/VERSION")
     run_p.add_argument("--run-id", default=None)
     run_p.add_argument("--prepare", help="executable called with a generation context JSON before module publication")
+    run_p.add_argument("--ledger-config", help="JSON ledger configuration; started records precede publication")
     run_p.add_argument("--lock-timeout", type=float, default=None)
     run_p.add_argument("--skip-live-check", action="store_true")
     run_p.add_argument("eb_args", nargs=argparse.REMAINDER, help="easyconfig and eb options, after --")
@@ -168,6 +169,7 @@ def _dispatch(args):
             run_id=args.run_id,
             skip_live_check=args.skip_live_check,
             prepare_executable=os.path.abspath(args.prepare) if args.prepare else None,
+            ledger_config=os.path.abspath(args.ledger_config) if args.ledger_config else None,
             lock_timeout=args.lock_timeout,
         )
         result = run(spec)
@@ -220,6 +222,9 @@ def _dispatch(args):
             )
             if journal.get("message"):
                 print(f"  {journal['message']}")
+            if journal.get("ledger_config"):
+                events = outbox.load(os.path.join(args.state_root, "runs", journal["run_id"]))["events"]
+                print(f"  ledger events: {len(events) - len(outbox.pending({'events': events}))}/{len(events)} acknowledged")
             for mod in modules:
                 print(f"  {mod.get('status'):<10} {mod.get('rel')}  {mod.get('generation')}")
         return 0

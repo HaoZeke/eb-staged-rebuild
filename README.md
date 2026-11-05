@@ -86,6 +86,31 @@ entire job before an operator resumes interrupted work.
 Journals use schema 2 so a reader that lacks preparation support refuses
 them. Schema 1 remains readable, and each journal write upgrades its schema.
 
+Publication events can be recorded in an eb-stack ledger:
+
+```bash
+eb-staged-rebuild run --ledger-config /absolute/path/ledger.json -- file.eb
+```
+
+The config names `eb_stack`, `log`, `key` and `head` (absolute paths),
+`actor`, `stack` and `target`, and optionally `public_key`, `action`
+(`rebuild-inplace` by default), `timeout` in seconds (120) and `required`
+(true). Each module gets a `started` record before its module file can
+change, `finished` after the run completes, and `aborted` when a rollback
+undoes a publication that never finished; rolling back a finished
+publication records `correction` stages naming the `finished` record. The
+records go to `runs/<run-id>/outbox.json` before delivery and are delivered
+in order by running `eb-stack ledger append`. An event counts as
+acknowledged only when eb-stack exits zero, its summary parses, the head
+file names the reported size and root, the logged line carries the event's
+`build.event_id`, and, with `public_key`, `eb-stack ledger verify` proves
+inclusion. Otherwise the event stays pending with the same record and the
+command exits 75: with `required`, no module file has changed; after
+publication, `resume` delivers the rest without rebuilding or republishing.
+`rollback` delivers pending events first and changes nothing while a
+required one stays pending.
+
+
 After a crash:
 
 ```bash
