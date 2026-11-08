@@ -40,6 +40,28 @@ eb-staged-rebuild run \
 The stable =Name/version= path becomes the complete staged tree. The previous
 tree remains at =Name/.version.<run-id>=.
 
+* Set permissions before the swap
+
+Name a program with =--prepare= (an absolute path) to set ownership, modes
+or ACLs on the staged tree and on each module's prepared file after the
+build and before the live directory is exchanged.
+
+#+begin_src sh
+eb-staged-rebuild run \
+  --software "$EASYBUILD_INSTALLPATH_SOFTWARE" \
+  --modules "$EASYBUILD_INSTALLPATH_MODULES" \
+  --prepare /usr/local/sbin/finalize-install \
+  -- Name-version-toolchain.eb --robot
+#+end_src
+
+The program gets one argument, a JSON file with =run_id=, =stage_software=,
+=live_software= and one entry per module (=rel=, =staged=, =prepared=,
+=live_module=). A non-zero exit is the command's exit and nothing is
+swapped; a tree the program leaves without =easybuild/*.eb= blocks the
+whole publication. A mode or ACL set on =prepared= reaches the live module
+file even when its text did not change. An install sealed read-only by
+EasyBuild publishes as it is.
+
 * Record the build in a ledger
 
 Two commands run beside =run=, each as a Python module, against the
