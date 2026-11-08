@@ -332,13 +332,21 @@ class _Verifier:
         self.timeout = timeout
 
     def _run(self, argv, expected, size, root):
-        """``expected`` is the receipt line; one tile-log line for ``size`` and ``root`` follows it."""
+        """``expected`` is the receipt line; one tile-log line for ``size`` and ``root`` follows it.
+
+        A size-0 head over an empty log was signed without a checkpoint and
+        eb-stack audits no tile log for it, so the receipt stands alone.
+        """
         code, stdout, stderr = _bounded([self.eb_stack, "ledger", "verify", *argv], self.timeout)
         if code != 0:
             raise VerificationError(f"eb-stack ledger verify exited {code}: {stderr.strip()[-500:]}")
         lines = stdout.splitlines(keepends=True)
-        tiles = _TILE_LOG.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
-        if lines[:1] != [expected] or tiles is None or tiles.groups() != (str(size), root):
+        if size == 0:
+            good = lines == [expected]
+        else:
+            tiles = _TILE_LOG.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
+            good = lines[:1] == [expected] and tiles is not None and tiles.groups() == (str(size), root)
+        if not good:
             raise VerificationError(f"eb-stack ledger verify printed an unexpected receipt: {stdout[-500:]!r}")
 
     def tiles(self, log):
@@ -736,8 +744,15 @@ def anchor(eb_stack, log, key, public_key, anchors, timeout=DEFAULT_TIMEOUT, fau
             signed = parse_head(signed_bytes, "the signed head")
             lines = stdout.splitlines(keepends=True)
             receipt = f"signed head size {signed['size']} root {signed['root']} at {ts} to {candidate}\n"
-            checkpoint = _CHECKPOINT.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
-            if lines[:1] != [receipt] or checkpoint is None or checkpoint.groups() != (str(signed["size"]), signed["root"]):
+            if signed["size"] == 0:
+                # An empty log has no record to derive a checkpoint origin from;
+                # eb-stack signs the size-0 head alone.
+                good = lines == [receipt]
+            else:
+                checkpoint = _CHECKPOINT.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
+                good = (lines[:1] == [receipt] and checkpoint is not None
+                        and checkpoint.groups() == (str(signed["size"]), signed["root"]))
+            if not good:
                 raise PublisherError(f"eb-stack ledger head printed an unexpected receipt: {stdout[-500:]!r}")
             if signed["ts"] != ts:
                 raise PublisherError(f"eb-stack ledger head signed at {signed['ts']}, not {ts}")

@@ -11,8 +11,9 @@
 * The ledger adapter and the maintenance verifier read the eb-stack 0.5.0
   CLI: the receipt is the first line `ledger append`, `ledger head` and
   `ledger verify` print, exactly one tile-log or checkpoint line for the
-  same size and root follows it, and a tile log is written beside every
-  private ledger copy before `ledger verify` audits it.
+  same size and root follows it (none for the size-0 head of an empty
+  log), and a tile log is written beside every private ledger copy before
+  `ledger verify` audits it.
 * `_bounded` runs the ledger CLI through pipes and kills its process group
   on every exit, including a signal to the caller, so an interrupted
   delivery leaves no eb-stack process behind.

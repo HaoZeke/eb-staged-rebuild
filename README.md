@@ -75,8 +75,8 @@ ledger, publishes daily signed anchors, proves the anchor chain, and projects
 package history from a verified log; see
 [docs/ledger-maintenance.md](docs/ledger-maintenance.md). Both speak to the
 eb-stack 0.5.0 ledger CLI: the first line a command prints is its receipt, a
-tile-log or checkpoint line follows it, and `verify` audits the tile log
-beside the ledger.
+tile-log or checkpoint line follows it (none for the size-0 head of an
+empty log), and `verify` audits the tile log beside the ledger.
 
 The state directory defaults to a hidden sibling of the software tree. It must
 be on the same filesystem as the live installs.
