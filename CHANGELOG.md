@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3
+
+* From the `fix/cluster-record-lock` line, on the directory-swap model: a
+  publication-preparation program that leaves a staged tree without build
+  evidence blocks the swap; an empty or relative `--prepare` is refused
+  before anything runs; a sealed (read-only) install takes the run marker
+  and moves beside the live tree through a writable window on its top
+  directory; a read-only module stage is cleared through the owned-tree
+  cleanup on resume; the preparation context names each staged tree as
+  `generation` too; a prepared access policy is published and rolled back
+  even when the module bytes did not change. The branch's prepare,
+  publication-metadata, read-only, sealed-install, ledger-policy and
+  bounded-output tests come along, written for the swap model; its
+  generation-pointer gc and outbox suites stay on the branch.
+
 ## 0.4.2
 
 * The ledger tests and the pinned-ledger CI action build eb-stack 0.7.0
