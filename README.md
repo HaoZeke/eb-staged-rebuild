@@ -43,7 +43,12 @@ unsandboxed fallback must be forbidden. Use `--backend installpath` only when
 the documented fallback is acceptable.
 
 `--eb` selects the EasyBuild executable (environment `EB_STAGED_REBUILD_EB`,
-default `eb`). `--run-id` names the journal instead of the generated id.
+default `eb`). `probe` learns whether that EasyBuild writes the stage paths
+into `bwrap_info.json` by importing its `easybuild.tools.bwrap` with the
+Python beside `eb`; when `eb` is a wrapper with no Python beside it, a table
+read from the framework source answers for 5.3.0, 5.3.1 (no stage keys, the
+5.3 layout), 5.4.0, 5.4.1 and 5.4.2 (keys present), and any other version
+reads as unknown. `--run-id` names the journal instead of the generated id.
 `--lock-timeout` is how long to wait for `<state-root>/.lock` and its POSIX
 record-lock sidecar `<state-root>/.lock.posix`, in seconds. Omit it and the
 wait has no deadline. `retire` defaults to 0. A 0.2.0 process takes only the
