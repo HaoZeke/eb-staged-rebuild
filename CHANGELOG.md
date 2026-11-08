@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 * `ledger_maintenance.anchor` accepts the `index checkpoint` line eb-stack
   0.6.0 prints after the head's checkpoint once the tile log has sealed a
