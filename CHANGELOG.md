@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 * `eb_staged_rebuild.build_events` records `started`, `finished` and
   `aborted` ledger events around one build command through a durable
