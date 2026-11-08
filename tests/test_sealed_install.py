@@ -13,8 +13,12 @@ from eb_staged_rebuild.modulefile import parse_root
 from tests.support import PROBES, classic_install, generation_of, installpath_builder
 
 
+STAMP = ".eb-staged-rebuild-complete"
+
+
 def snapshot(root):
-    paths = [root] + sorted(root.rglob("*"))
+    """Modes and digests under ``root``, without the tool's own stamp."""
+    paths = [root] + sorted(path for path in root.rglob("*") if path.name != STAMP)
     return {
         str(path.relative_to(root)): (
             stat.S_IMODE(path.stat().st_mode),
@@ -59,9 +63,10 @@ def sealed_fixture():
         try:
             yield fixture
         finally:
-            if target.exists():
-                for path in [target] + list(target.rglob("*")):
-                    path.chmod(0o755 if path.is_dir() else 0o644)
+            for tree in (target, Path(original), Path(original).parent / ".1.sealed"):
+                if tree.exists():
+                    for path in [tree] + list(tree.rglob("*")):
+                        path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 class SealedInstallTests(unittest.TestCase):
@@ -75,11 +80,15 @@ class SealedInstallTests(unittest.TestCase):
         )
 
     def assert_published_without_package_changes(self, fixture):
-        self.assertEqual(parse_root(fixture.module.read_text())[1], str(fixture.target))
-        self.assertEqual((fixture.target / "PAYLOAD").read_text(), "v1\n")
-        self.assertEqual(snapshot(fixture.target), fixture.sealed_snapshot[0])
-        self.assertEqual(snapshot(fixture.original), fixture.original_snapshot)
-        self.assertEqual(fixture.original.stat().st_ino, fixture.original_inode)
+        # The swap put the sealed tree at the stable path the module names;
+        # the previous tree sits beside it as the hidden sibling, untouched.
+        live = fixture.original
+        self.assertEqual(parse_root(fixture.module.read_text())[1], str(live))
+        self.assertEqual((live / "PAYLOAD").read_text(), "v1\n")
+        self.assertEqual(snapshot(live), fixture.sealed_snapshot[0])
+        retired = live.parent / ".1.sealed"
+        self.assertEqual(snapshot(retired), fixture.original_snapshot)
+        self.assertEqual(retired.stat().st_ino, fixture.original_inode)
 
     def test_publish_preserves_sealed_files_and_permissions(self):
         with sealed_fixture() as fixture:
@@ -89,11 +98,13 @@ class SealedInstallTests(unittest.TestCase):
             restored = rollback(str(fixture.state), "sealed")
             self.assertEqual(restored.returncode, 0, restored.message)
             self.assertEqual(fixture.module.read_text(), fixture.original_text)
-            self.assertEqual(snapshot(fixture.target), fixture.sealed_snapshot[0])
+            self.assertEqual(snapshot(fixture.original), fixture.original_snapshot)
+            self.assertEqual(fixture.original.stat().st_ino, fixture.original_inode)
+            self.assertEqual(snapshot(fixture.original.parent / ".1.sealed"), fixture.sealed_snapshot[0])
 
     def test_resume_publishes_sealed_generation_without_rebuilding(self):
         with sealed_fixture() as fixture:
-            faults = FaultInjector("publish.file:all/demo/1.lua.rename")
+            faults = FaultInjector("journal.publishing.write")
             with self.assertRaises(InjectedCrash):
                 run(self.spec(fixture, faults))
             self.assertEqual(fixture.module.read_text(), fixture.original_text)

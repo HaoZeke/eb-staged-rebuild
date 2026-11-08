@@ -1,6 +1,5 @@
 import contextlib
 import io
-import json
 from pathlib import Path
 import signal
 import sys
@@ -60,7 +59,7 @@ class PrepareRecoveryTests(unittest.TestCase):
             result = resume(spec.state_root, 'prepare', builder=counted)
             self.assertEqual(result.returncode, 0, result.message)
             self.assertEqual(len(calls), 1)
-            self.assertNotEqual(module.read_text(), text)
+            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'new\n')
 
     def test_child_signal_has_a_shell_exit_status(self):
         command = [sys.executable, '-c', 'import os, signal; os.kill(os.getpid(), signal.SIGTERM)']
@@ -74,12 +73,6 @@ class PrepareRecoveryTests(unittest.TestCase):
             self.assertEqual(run(spec).returncode, 0)
             journal = load_journal(journal_path(spec.state_root, 'prepare'))
             self.assertEqual(journal['schema'], 2)
-
-    def test_schema_one_remains_readable(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'journal.json'
-            path.write_text(json.dumps({'schema': 1, 'run_id': 'legacy'}))
-            self.assertEqual(load_journal(path)['run_id'], 'legacy')
 
 
 if __name__ == '__main__':

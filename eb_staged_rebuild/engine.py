@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import time
 from dataclasses import dataclass, field
 
@@ -32,6 +33,7 @@ from eb_staged_rebuild.discover import (
     walk_module_tree,
 )
 from eb_staged_rebuild.constants import DEFAULT_GRACE_HOURS, RUN_ID_TIMESTAMP_FORMAT
+from eb_staged_rebuild.cleanup import remove_generation_tree
 from eb_staged_rebuild.errors import NeedsIntervention, Refused
 from eb_staged_rebuild.faults import FaultInjector
 from eb_staged_rebuild.journal import (
@@ -44,7 +46,7 @@ from eb_staged_rebuild.journal import (
 )
 from eb_staged_rebuild.livecheck import empty_real_dir, same_snapshot, snapshot
 from eb_staged_rebuild.lockfile import FileLock
-from eb_staged_rebuild.modulefile import generation_complete, parse_root
+from eb_staged_rebuild.modulefile import install_complete, generation_complete, parse_root
 from eb_staged_rebuild.paths import (
     abspath,
     assert_real_components,
@@ -117,6 +119,10 @@ class _Ctx:
 
 
 def _check_roots(spec):
+    if spec.prepare_executable is not None and not spec.prepare_executable:
+        raise Refused("publication preparation executable must not be empty")
+    if spec.prepare_executable is not None and not os.path.isabs(spec.prepare_executable):
+        raise Refused("publication preparation executable must be an absolute path")
     if not is_real_dir(spec.software):
         kind = lstat_kind(spec.software)
         if kind == "symlink":
@@ -346,11 +352,14 @@ def _plan(spec, journal, faults):
             "module": rel,
             "sha256": sha256_bytes(new_text.encode("utf-8")),
         }
-        atomic_write(
-            os.path.join(staged, ".eb-staged-rebuild-complete"),
-            json.dumps(stamp, indent=2, sort_keys=True) + "\n",
-            faults,
-            f"stamp:{rel}",
+        _write_into_sealed_directory(
+            staged,
+            lambda: atomic_write(
+                os.path.join(staged, ".eb-staged-rebuild-complete"),
+                json.dumps(stamp, indent=2, sort_keys=True) + "\n",
+                faults,
+                f"stamp:{rel}",
+            ),
         )
         existed = lstat_kind(live_module) == "file"
         old_hash = None
@@ -395,6 +404,44 @@ def _plan(spec, journal, faults):
         )
     journal["modules_plan"] = plan
     journal["links_plan"] = link_plan
+
+
+def _write_into_sealed_directory(directory, write):
+    """Run ``write`` with ``directory`` writable, then put its mode back.
+
+    EasyBuild's ``read-only-installdir`` seals a finished install; the stamp
+    still has to land beside it. The directory's own mode is the only thing
+    that changes, and only for the duration of the write.
+    """
+    info = os.stat(directory)
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & stat.S_IWUSR:
+        return write()
+    os.chmod(directory, mode | stat.S_IWUSR | stat.S_IXUSR)
+    try:
+        return write()
+    finally:
+        os.chmod(directory, mode)
+
+
+def _move_sealed_directory(source, destination):
+    """Rename a directory to another parent, sealed or not.
+
+    Moving a directory rewrites its ``..`` entry, so Linux wants write
+    permission on the directory itself. A read-only install gets it for the
+    rename alone and has its mode back at the new name.
+    """
+    mode = stat.S_IMODE(os.stat(source).st_mode)
+    if mode & stat.S_IWUSR:
+        os.rename(source, destination)
+        return
+    os.chmod(source, mode | stat.S_IWUSR | stat.S_IXUSR)
+    moved = False
+    try:
+        os.rename(source, destination)
+        moved = True
+    finally:
+        os.chmod(destination if moved else source, mode)
 
 
 def _tree_run_id(path):
@@ -457,7 +504,7 @@ def _prepare_swap_source(mod, run_id, faults):
     if staged_kind == "dir" and retired_kind == "missing":
         faults.reach(f"stage.move:{mod['rel']}")
         try:
-            os.rename(staged, retired)
+            _move_sealed_directory(staged, retired)
         except OSError as error:
             if error.errno == errno.EXDEV:
                 raise Refused(
@@ -710,7 +757,7 @@ def _clear_stage_modules(generation_root):
     if os.path.islink(modules):
         raise Refused(f"refusing to clear a symlinked module stage: {modules}")
     if os.path.isdir(modules):
-        shutil.rmtree(modules)
+        remove_generation_tree(modules, os.path.abspath(generation_root))
 
 
 def _build(spec, journal, faults):
@@ -790,8 +837,13 @@ def _prepare_publication(spec, journal, faults):
         "stage_modules": journal["stage_modules"],
         "modules": [
             {
-                key: mod[key]
-                for key in ("rel", "staged", "live_software", "retired", "live_module", "prepared")
+                **{
+                    key: mod[key]
+                    for key in ("rel", "staged", "live_software", "retired", "live_module", "prepared")
+                },
+                # The staged tree under its generation name, for a finalizer
+                # written against the generation-pointer context.
+                "generation": mod["staged"],
             }
             for mod in journal["modules_plan"]
         ],
@@ -812,6 +864,19 @@ def _prepare_publication(spec, journal, faults):
             f"publication preparation exited {rc}; the live directory was not swapped",
             rc,
         )
+    # The program ran over every staged tree. One it left without build
+    # evidence blocks the whole set: a swap of the others would publish a
+    # module whose sibling is gone.
+    for mod in journal["modules_plan"]:
+        if not install_complete(mod["staged"]):
+            return _preparation_failure(
+                spec,
+                journal,
+                faults,
+                f"publication preparation left {mod['rel']} incomplete at {mod['staged']}; "
+                "the live directory was not swapped",
+                2,
+            )
     try:
         _validate_publication_set(journal)
     except (Refused, NeedsIntervention) as exc:

@@ -249,15 +249,21 @@ class ExactReceiptTests(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(subprocess.run, ["rm", "-rf", str(self.root)], check=False)
 
-    def ledger(self, stdout_bytes):
-        """A ledger whose eb-stack pads its stdout to ``stdout_bytes`` and floods stderr."""
+    def ledger(self, stdout_bytes, receipt_first=True):
+        """A ledger whose eb-stack pads its stdout to ``stdout_bytes`` and floods stderr.
+
+        The receipt is the first line eb-stack 0.6 prints; ``receipt_first``
+        False puts the padding before it, as a helper that chatters before
+        the receipt would.
+        """
         wrapper = self.root / "eb-stack"
         wrapper.write_text(textwrap.dedent(f"""\
             #!{sys.executable}
             import os, subprocess, sys
             done = subprocess.run([sys.executable, {str(FAKE)!r}, *sys.argv[1:]], capture_output=True)
             pad = {stdout_bytes} - len(done.stdout)
-            body = (b"p" * (pad - 1) + b"\\n" if pad > 0 else b"") + done.stdout
+            padding = b"p" * (pad - 1) + b"\\n" if pad > 0 else b""
+            body = done.stdout + padding if {receipt_first!r} else padding + done.stdout
             with open({str(self.root / "sizes")!r}, "a") as handle:
                 handle.write(str(len(body)) + "\\n")
             for start in range(0, len(body), 4096):
@@ -292,7 +298,7 @@ class ExactReceiptTests(unittest.TestCase):
         self.assertEqual(self.sizes()[1], _OUTPUT_LIMIT)
 
     def test_receipt_beyond_the_output_limit_is_not_read(self):
-        ledger, record = self.ledger(2 * _OUTPUT_LIMIT)
+        ledger, record = self.ledger(2 * _OUTPUT_LIMIT, receipt_first=False)
         with self.assertRaisesRegex(PublisherError, "printed no receipt"):
             ledger.append(record)
         self.assertEqual(self.sizes(), [2 * _OUTPUT_LIMIT])

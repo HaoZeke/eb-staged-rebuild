@@ -8,7 +8,7 @@ from eb_staged_rebuild.engine import Spec, resume, run
 from eb_staged_rebuild.faults import FaultInjector, InjectedCrash
 from eb_staged_rebuild.journal import journal_path, load_journal
 from eb_staged_rebuild.modulefile import parse_root
-from tests.support import PROBES, classic_install, generation_of, installpath_builder
+from tests.support import PROBES, classic_install, installpath_builder
 
 
 class PreparePublicationTests(unittest.TestCase):
@@ -46,11 +46,13 @@ class PreparePublicationTests(unittest.TestCase):
             spec, module, text, count = self.fixture(directory)
             result = run(spec)
             self.assertEqual(result.returncode, 0, result.message)
-            generation = Path(generation_of(spec.state_root, 'prepare', 'demo/1'))
-            self.assertEqual(parse_root(module.read_text())[1], str(generation))
-            self.assertEqual(stat.S_IMODE((generation / 'easybuild').stat().st_mode), 0o700)
+            # The finalizer restricted the staged tree; the swap published
+            # that tree at the stable path the module names.
+            live = Path(spec.software) / 'demo/1'
+            self.assertEqual(parse_root(module.read_text())[1], str(live))
+            self.assertEqual(stat.S_IMODE((live / 'easybuild').stat().st_mode), 0o700)
             self.assertEqual(count.read_text(), 'called\n')
-            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'old\n')
+            self.assertEqual((live / 'PAYLOAD').read_text(), 'new\n')
 
     def test_finalizer_nonzero_exit_preserves_live_module(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +60,7 @@ class PreparePublicationTests(unittest.TestCase):
             result = run(spec)
             self.assertEqual(result.returncode, 42)
             self.assertEqual(module.read_text(), text)
+            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'old\n')
             journal = load_journal(journal_path(spec.state_root, 'prepare'))
             self.assertFalse(journal['prepare_complete'])
             self.assertEqual(journal['prepare_returncode'], 42)
@@ -83,20 +86,21 @@ class PreparePublicationTests(unittest.TestCase):
             result = resume(spec.state_root, 'prepare', builder=spec.builder)
             self.assertEqual(result.returncode, 0, result.message)
             self.assertEqual(count.read_text(), 'called\n')
-            self.assertNotEqual(module.read_text(), text)
+            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'new\n')
 
     def test_resume_during_publication_does_not_repeat_finalizer(self):
         with tempfile.TemporaryDirectory() as directory:
             spec, module, text, count = self.fixture(directory)
-            spec.faults = FaultInjector('publish.file:all/demo/1.lua.rename')
+            spec.faults = FaultInjector('journal.publishing.write')
             with self.assertRaises(InjectedCrash):
                 run(spec)
             self.assertEqual(module.read_text(), text)
+            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'old\n')
             self.assertEqual(count.read_text(), 'called\n')
             result = resume(spec.state_root, 'prepare', builder=spec.builder)
             self.assertEqual(result.returncode, 0, result.message)
             self.assertEqual(count.read_text(), 'called\n')
-            self.assertNotEqual(module.read_text(), text)
+            self.assertEqual((Path(spec.software) / 'demo/1/PAYLOAD').read_text(), 'new\n')
 
 
 if __name__ == '__main__':

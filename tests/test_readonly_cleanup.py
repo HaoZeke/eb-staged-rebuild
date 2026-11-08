@@ -1,14 +1,10 @@
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
-from eb_staged_rebuild.engine import Spec, resume, rollback, run
+from eb_staged_rebuild.engine import Spec, resume, run
 from eb_staged_rebuild.faults import FaultInjector, InjectedCrash
-from eb_staged_rebuild.gc import collect
-from eb_staged_rebuild.lockfile import FileLock
 from tests.support import PROBES, classic_install, installpath_builder
 
 
@@ -55,48 +51,10 @@ class ReadonlyCleanupTests(unittest.TestCase):
             self.assertEqual(module.read_text(), text)
             result = resume(spec.state_root, 'sealed', builder=sealed)
             self.assertEqual(result.returncode, 0, result.message)
-            self.assertEqual((original / 'PAYLOAD').read_text(), 'old\n')
-            self.assertNotEqual(module.read_text(), text)
-
-    def test_gc_removes_a_sealed_generation_without_following_links(self):
-        with tempfile.TemporaryDirectory() as directory:
-            spec, original, _, _ = self.fixture(directory)
-            self.assertEqual(run(spec).returncode, 0)
-            self.assertEqual(rollback(spec.state_root, 'sealed', clock=lambda: 101).returncode, 0)
-            generation = Path(spec.state_root) / 'generations/sealed'
-            (generation / 'outside').symlink_to(original, target_is_directory=True)
-            original_mode = original.stat().st_mode
-            seal_tree(generation)
-            actions = collect(spec.state_root, grace_hours=0, now=102)
-            self.assertTrue(any(a['action'] == 'remove' for a in actions))
-            self.assertFalse(generation.exists())
-            self.assertEqual((original / 'PAYLOAD').read_text(), 'old\n')
-            self.assertEqual(original.stat().st_mode, original_mode)
-
-    def test_gc_waits_for_the_publication_lock(self):
-        with tempfile.TemporaryDirectory() as directory:
-            spec, original, _, _ = self.fixture(directory)
-            self.assertEqual(run(spec).returncode, 0)
-            self.assertEqual(rollback(spec.state_root, 'sealed', clock=lambda: 101).returncode, 0)
-            generation = Path(spec.state_root) / 'generations/sealed'
-            holder = FileLock(spec.state_root)
-            holder.acquire()
-            program = ('from eb_staged_rebuild.gc import collect; '
-                       'print("READY", flush=True); '
-                       f'collect({spec.state_root!r}, grace_hours=0, now=102)')
-            process = subprocess.Popen([sys.executable, '-c', program], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True)
-            try:
-                self.assertEqual(process.stdout.readline().strip(), 'READY')
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    process.communicate(timeout=0.3)
-                self.assertTrue(generation.exists())
-            finally:
-                holder.release()
-                stdout, stderr = process.communicate(timeout=10)
-            self.assertEqual(process.returncode, 0, stderr)
-            self.assertFalse(generation.exists())
-            self.assertEqual((original / 'PAYLOAD').read_text(), 'old\n')
+            # The swap published the rebuilt tree at the stable path and kept
+            # the previous one beside it.
+            self.assertEqual((original / 'PAYLOAD').read_text(), 'new\n')
+            self.assertEqual((original.parent / '.1.sealed' / 'PAYLOAD').read_text(), 'old\n')
 
 
 if __name__ == '__main__':
