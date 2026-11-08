@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+* The ledger tests and the pinned-ledger CI action build eb-stack 0.7.0
+  (defb6ae); the ledger CLI's receipt, tile-log and checkpoint lines are
+  unchanged from 0.6.2.
+
 ## 0.4.1
 
 * `ledger_maintenance.anchor` accepts the `index checkpoint` line eb-stack
