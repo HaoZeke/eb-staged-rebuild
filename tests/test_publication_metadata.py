@@ -18,9 +18,13 @@ class PublicationMetadataTests(unittest.TestCase):
         software.mkdir()
         modules.mkdir()
         module = modules / 'all/demo/1.lua'
+        # The directory swap rebuilds a live install in place; a module file
+        # that is new to the tree still has its install directory.
+        classic_install(str(software), str(modules), 'demo/1', 'old', 'all/demo/1.lua')
         if existing:
-            classic_install(str(software), str(modules), 'demo/1', 'old', 'all/demo/1.lua')
             module.chmod(0o600)
+        else:
+            module.unlink()
         build = installpath_builder([{'rel': 'demo/1', 'payload': 'new',
                                       'module_rel': 'all/demo/1.lua'}])
 

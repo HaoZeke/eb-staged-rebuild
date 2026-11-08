@@ -530,7 +530,11 @@ def _write_new_module(mod, faults):
     live = mod["live_module"]
     kind = lstat_kind(live)
     if kind == "file" and sha256_bytes(read_bytes(live)) == mod["new_hash"]:
-        return
+        # Same bytes is not the same module: a publication-preparation
+        # program may have set the access policy on the prepared file, and
+        # that policy is published with it.
+        if _same_access(live, mod["prepared"]):
+            return
     if mod["existed"]:
         if kind != "file" or sha256_bytes(read_bytes(live)) != mod["old_hash"]:
             raise NeedsIntervention(f"{live} is not the previous module file")
@@ -545,6 +549,19 @@ def _write_new_module(mod, faults):
     )
 
 
+def _same_access(left, right):
+    """Whether two files carry the same owner, mode and ACL bytes."""
+    try:
+        first, second = read_metadata(left), read_metadata(right)
+    except (OSError, Refused):
+        return False
+    return (
+        (first.info.st_uid, first.info.st_gid, stat.S_IMODE(first.info.st_mode))
+        == (second.info.st_uid, second.info.st_gid, stat.S_IMODE(second.info.st_mode))
+        and first.acls == second.acls
+    )
+
+
 def _restore_old_module(mod, faults):
     live = mod["live_module"]
     kind = lstat_kind(live)
@@ -556,7 +573,10 @@ def _restore_old_module(mod, faults):
         if sha256_bytes(previous) != mod["old_hash"]:
             raise NeedsIntervention(f"backup for {mod['rel']} changed")
         if kind == "file" and sha256_bytes(read_bytes(live)) == mod["old_hash"]:
-            return
+            # The backup carries the previous access policy; the same bytes
+            # under a published policy still have to go back.
+            if _same_access(live, backup):
+                return
         if kind != "file" or sha256_bytes(read_bytes(live)) != mod["new_hash"]:
             raise NeedsIntervention(f"{live} is neither the old nor new module file")
         atomic_write(
