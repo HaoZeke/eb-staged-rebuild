@@ -40,6 +40,37 @@ eb-staged-rebuild run \
 The stable =Name/version= path becomes the complete staged tree. The previous
 tree remains at =Name/.version.<run-id>=.
 
+* Record the build in a ledger
+
+Two commands run beside =run=, each as a Python module, against the
+=eb-stack= ledger CLI (0.5.2 or later).
+
+#+begin_src sh
+python3 -m eb_staged_rebuild.build_events \
+  --config /etc/build-events/ledger.json \
+  --metadata "$WORKSPACE/build-event.json" \
+  -- eb Name-version-toolchain.eb --robot
+#+end_src
+
+=build_events= appends a =started= record before the command runs and a
+=finished= or =aborted= record after it, through an outbox that survives a
+crash; exit 75 means an event is still pending, and the same command
+delivers it. Every field of the config and the metadata is in
+[[file:../../build-events.md][docs/build-events.md]].
+
+#+begin_src sh
+python3 -m eb_staged_rebuild.ledger_maintenance anchor \
+  --eb-stack /abs/eb-stack --log /abs/ledger/stack.jsonl \
+  --key /abs/keys/ledger.pem --public-key /abs/keys/ledger.pub \
+  --anchors /abs/anchors
+#+end_src
+
+=ledger_maintenance= publishes one signed anchor per day, proves the anchor
+chain (=verify-anchors=), backfills observed history from a pinned manifest
+(=backfill=) and writes package history from a verified log (=project=).
+The commands, their refusals and their exit codes are in
+[[file:../../ledger-maintenance.md][docs/ledger-maintenance.md]].
+
 * Recover or roll back
 
 #+begin_src sh
