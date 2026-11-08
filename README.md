@@ -54,8 +54,16 @@ record-lock sidecar `<state-root>/.lock.posix`, in seconds. Omit it and the
 wait has no deadline. `retire` defaults to 0. A 0.2.0 process takes only the
 local flock lock. That process does not take the sidecar.
 
-The `--prepare` option names an executable. That executable receives a
-directory-swap context JSON before the live directory is exchanged.
+The `--prepare` option names an executable, by an absolute path; an empty
+or relative value is refused before anything runs. That executable receives
+a directory-swap context JSON before the live directory is exchanged; each
+module entry carries its staged tree as `staged` and again as `generation`.
+A mode or ACL the program sets on a module's `prepared` file is published
+with the module, whether or not the module text changed, and rollback puts
+the previous policy back. A program that leaves a staged tree without build
+evidence (`easybuild/*.eb`) blocks the whole publication. A read-only
+install, as EasyBuild's `read-only-installdir` leaves it, publishes and
+rolls back with its files and permissions intact.
 `--ledger-config` names a JSON eb-stack ledger configuration; `started`
 records are acknowledged before the swap, and the stable
 `software/<name>/<version>` path is the record's `location`. `--module`

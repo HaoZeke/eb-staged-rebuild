@@ -41,10 +41,16 @@ EasyBuild options that could redirect the build are removed:
 
 The planner requires an existing non-symlink live `Name/version` directory for
 each module. The planner verifies that the staged install is complete. The
-planner writes a run marker into the staged install. The planner prepares a
-module file whose root is the stable live path. The planner records and durably
-backs up the current module file. The planner moves the stage to a hidden
-sibling on the same filesystem.
+planner writes a run marker into the staged install; a sealed install gets
+owner write on its top directory for that one write and has its mode back
+after it. The planner prepares a module file whose root is the stable live
+path. The planner records and durably backs up the current module file. The
+planner moves the stage to a hidden sibling on the same filesystem, again
+through a writable window on a sealed top directory, since a directory
+rename to another parent rewrites its `..` entry. After the optional
+preparation program ran, every staged tree must still carry build evidence
+(`PAYLOAD` from the test builders or `easybuild/*.eb` from EasyBuild; the
+run marker does not count), or nothing is swapped.
 
 The publish step attempts Linux `renameat2` with `RENAME_EXCHANGE` first (`1 << 1`,
 from `include/uapi/linux/fs.h`). The syscall changes both directory names in

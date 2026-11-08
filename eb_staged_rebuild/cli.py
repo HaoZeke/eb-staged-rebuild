@@ -194,6 +194,8 @@ def _dispatch(args):
             prepare_executable=args.prepare,
             ledger_config=args.ledger_config,
         )
+        if args.prepare is not None and not args.prepare:
+            raise Refused("--prepare must name a program; it is empty")
         result = run(spec)
         return result.returncode
     if args.command == "resume":

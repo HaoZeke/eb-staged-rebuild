@@ -108,3 +108,27 @@ def generation_complete(path):
             if name.endswith(".eb") and lstat_kind(os.path.join(meta, name)) == "file":
                 return True
     return False
+
+
+def install_complete(path):
+    """A staged install is complete when it is a real directory with build evidence.
+
+    Accepted, any one of them: ``PAYLOAD`` (the fault-injection builders) or a
+    readable ``easybuild/*.eb`` (EasyBuild copies the easyconfig in at the end
+    of a build). The tool's own completion stamp is not evidence: a
+    publication-preparation step that empties the tree leaves the stamp.
+    """
+    from eb_staged_rebuild.paths import is_real_dir, lstat_kind
+
+    if not is_real_dir(path):
+        return False
+    if lstat_kind(os.path.join(path, "PAYLOAD")) == "file":
+        return True
+    metadata = os.path.join(path, "easybuild")
+    if not is_real_dir(metadata):
+        return False
+    try:
+        names = os.listdir(metadata)
+    except OSError:
+        return False
+    return any(name.endswith(".eb") and lstat_kind(os.path.join(metadata, name)) == "file" for name in names)
