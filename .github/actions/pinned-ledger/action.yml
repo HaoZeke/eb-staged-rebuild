@@ -10,7 +10,7 @@ runs:
         ledger_source="$RUNNER_TEMP/eb-stack-e368fa9"
         archive="$RUNNER_TEMP/eb-stack-e368fa9.tar.gz"
         curl -fsSL --retry 3 --connect-timeout 15 https://codeload.github.com/HaoZeke/eb-stack/tar.gz/e368fa9eef1d3e57a1e3ff57927fc6ca346f5745 -o "$archive"
-        printf '%s  %s\n' 10451d33457c5ecc8af6931647e61a2965e93c61dcbdaf0c1531580214577291 "$archive" | sha256sum --check -
+        printf '%s  %s\n' b728dbf1e7187466e78aa12758b6cbd629a68ae1329fa1f4ebaa40f879de23d0 "$archive" | sha256sum --check -
         mkdir "$ledger_source"
         tar -xzf "$archive" --strip-components=1 -C "$ledger_source"
         rustup toolchain install 1.90.0 --profile minimal
