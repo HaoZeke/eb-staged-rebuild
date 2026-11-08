@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 * EasyBuild 5.4.1 is in the bwrap key table: its `bwrap_info.json` carries
   `bwrap_installpath_software` and `bwrap_installpath_modules`
