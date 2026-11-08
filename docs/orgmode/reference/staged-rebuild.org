@@ -20,6 +20,15 @@ the original live and staged names. An uncatchable process or host failure is
 recovered from the hold path by =resume=. The fallback has a transient
 missing-name interval; exchange does not.
 
+Before the swap, an optional preparation program (=--prepare=, absolute
+path) runs over a JSON context naming every staged tree; a non-zero exit or
+a staged tree left without build evidence (=easybuild/*.eb=) means nothing
+is swapped. A mode or ACL the program sets on a module's prepared file is
+published with the module whether or not its text changed. A sealed
+install (EasyBuild =read-only-installdir=) is stamped and moved beside the
+live tree through a writable window on its top directory alone, because a
+rename to another parent rewrites the directory's =..= entry.
+
 * Lock and journal
 
 One advisory =flock= covers build, publish, resume, and rollback. The journal

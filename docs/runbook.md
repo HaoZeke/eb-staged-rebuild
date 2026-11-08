@@ -168,6 +168,8 @@ eb-staged-rebuild run \
   --run-id RUNID \
   --lock-timeout 30 \
   --skip-live-check \
+  --prepare /shared/bin/finalize-install \
+  --ledger-config /shared/.eb-staged-rebuild/ledger.json \
   -- Name-version-toolchain.eb
 ```
 
@@ -188,6 +190,24 @@ eb-staged-rebuild run \
   Repeat the option for each known install.
 * `--skip-live-check` does not record file contents before the build and does
   not refuse when those contents change before publish.
+* `--prepare` names a program by an absolute path; an empty or relative
+  value is refused before anything runs. The program gets one argument, a
+  JSON context with the run id, the stable and staged paths, and one entry
+  per module (`rel`, `staged`, also spelled `generation`, `live_software`,
+  `retired`, `live_module`, `prepared`). It runs after the build and before
+  the swap. A non-zero exit is the command's exit, with nothing swapped.
+  A mode or ACL it sets on a module's `prepared` file is published with
+  the module even when the module text did not change, and rollback puts
+  the previous policy back. A staged tree it leaves without build evidence
+  (`easybuild/*.eb`) blocks the whole publication.
+* `--ledger-config` names a JSON eb-stack ledger configuration. `started`
+  records are acknowledged before the swap and `finished` after it; a
+  required ledger that cannot acknowledge leaves the live tree alone and
+  exits 75, and the policy the run started with is frozen in its journal.
+* A read-only install, as EasyBuild's `read-only-installdir` leaves it,
+  publishes and rolls back with its files and permissions intact; the tool
+  opens a writable window on the top directory alone, for the run marker
+  and for the move beside the live tree.
 
 ```bash
 eb-staged-rebuild resume \
