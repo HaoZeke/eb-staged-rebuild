@@ -70,6 +70,8 @@ _ANCHOR_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})\.head\.json$")
 _TILE_LOG = re.compile(r"^tile log size (\d+) root ([0-9a-f]{64}) extends the head and holds the same lines$")
 # The line eb-stack prints after a head receipt: the checkpoint it wrote.
 _CHECKPOINT = re.compile(r"^checkpoint \S+ size (\d+) root ([0-9a-f]{64}) to .+$")
+# The line after that once the tile log's index log has a checkpoint of its own.
+_INDEX_CHECKPOINT = re.compile(r"^index checkpoint \S+/index size \d+ root [0-9a-f]{64} to .+$")
 _STAGING_PREFIX = ".anchor-staging-"
 
 
@@ -749,8 +751,11 @@ def anchor(eb_stack, log, key, public_key, anchors, timeout=DEFAULT_TIMEOUT, fau
                 # eb-stack signs the size-0 head alone.
                 good = lines == [receipt]
             else:
-                checkpoint = _CHECKPOINT.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
-                good = (lines[:1] == [receipt] and checkpoint is not None
+                # The checkpoint line follows the receipt; an index checkpoint
+                # line follows that once the tile log has sealed a run.
+                checkpoint = _CHECKPOINT.match(lines[1].rstrip("\n")) if len(lines) in (2, 3) else None
+                index_ok = len(lines) == 2 or _INDEX_CHECKPOINT.match(lines[2].rstrip("\n")) is not None
+                good = (lines[:1] == [receipt] and checkpoint is not None and index_ok
                         and checkpoint.groups() == (str(signed["size"]), signed["root"]))
             if not good:
                 raise PublisherError(f"eb-stack ledger head printed an unexpected receipt: {stdout[-500:]!r}")

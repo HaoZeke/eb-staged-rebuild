@@ -460,6 +460,15 @@ class AnchorTests(RealLedger):
         with self.assertRaisesRegex(Refused, "not on 2026-11-02"):
             self.anchor(clock=DAY2)
 
+    def test_an_index_checkpoint_line_after_the_head_receipt_is_accepted(self):
+        self.append("demo/1", "install")
+        indexed = self.wrapper(
+            'if argv[:2] == ["ledger", "head"]:\n'
+            '    out += "index checkpoint eb-stack-ledger/demo/2026/index size 1 root " + "0" * 64 + " to /x\\n"\n'
+        )
+        self.assertEqual(self.anchor(eb=indexed)["status"], "published")
+        self.assertEqual(self.anchor_files(), ["2026-11-03.head.json"])
+
     def test_malformed_head_receipts_are_refused(self):
         self.append("demo/1", "install")
         noisy = self.wrapper('if argv[:2] == ["ledger", "head"]:\n    out += "extra\\n"\n')
