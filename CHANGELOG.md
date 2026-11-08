@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+* `eb_staged_rebuild.build_events` records `started`, `finished` and
+  `aborted` ledger events around one build command through a durable
+  outbox, and `eb_staged_rebuild.ledger_maintenance` backfills observed
+  history, publishes daily signed anchors, proves the anchor chain and
+  projects package history from a verified log (`docs/build-events.md`,
+  `docs/ledger-maintenance.md`).
+* The ledger adapter and the maintenance verifier read the eb-stack 0.5.0
+  CLI: the receipt is the first line `ledger append`, `ledger head` and
+  `ledger verify` print, exactly one tile-log or checkpoint line for the
+  same size and root follows it, and a tile log is written beside every
+  private ledger copy before `ledger verify` audits it.
+* `_bounded` runs the ledger CLI through pipes and kills its process group
+  on every exit, including a signal to the caller, so an interrupted
+  delivery leaves no eb-stack process behind.
+
 ## 0.3.1
 
 * EasyBuild 5.4.1 is in the bwrap key table: its `bwrap_info.json` carries

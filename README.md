@@ -65,6 +65,19 @@ names a `Name/version` to publish when EasyBuild's dry-run does not.
 run whose modules are still pending, once the grace period has passed.
 `resolve` prints the install path a module file names.
 
+Two modules run beside `run` rather than inside it. `python3 -m
+eb_staged_rebuild.build_events -- COMMAND` records a `started` event in the
+eb-stack ledger before one build command runs and a `finished` or `aborted`
+event after it, through a durable outbox; see
+[docs/build-events.md](docs/build-events.md). `python -m
+eb_staged_rebuild.ledger_maintenance` backfills observed history into a
+ledger, publishes daily signed anchors, proves the anchor chain, and projects
+package history from a verified log; see
+[docs/ledger-maintenance.md](docs/ledger-maintenance.md). Both speak to the
+eb-stack 0.5.0 ledger CLI: the first line a command prints is its receipt, a
+tile-log or checkpoint line follows it, and `verify` audits the tile log
+beside the ledger.
+
 The state directory defaults to a hidden sibling of the software tree. It must
 be on the same filesystem as the live installs.
 
@@ -109,6 +122,10 @@ python3 -m unittest discover -s tests -v
 Set `EB_STAGED_REBUILD_INTEGRATION=1` to enable the real EasyBuild/Lmod tests.
 With that variable set, missing `eb` or Lmod is a failure. The bubblewrap case
 skips when `bwrap` is not usable on that host.
+
+The ledger tests need `EB_STACK_BIN`, an eb-stack 0.5.0 binary, and `openssl`
+on `PATH`; `tests/test_ledger_eb_stack.py` skips without the binary, the
+build-events and ledger-maintenance suites fail without it.
 
 See [DESIGN.md](DESIGN.md), [the runbook](docs/runbook.md), and the Org-mode
 [how-to](docs/orgmode/howto/staged-rebuild.org) and
