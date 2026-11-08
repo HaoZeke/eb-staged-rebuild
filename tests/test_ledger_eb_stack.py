@@ -1,7 +1,7 @@
 """Ledger append, recovery, and idempotence against a real eb-stack binary.
 
-Set ``EB_STACK_BIN`` to the executable built from commit
-``07787c1f29e090643582d9e91cd6e19a66c80707``. The test is skipped when that
+Set ``EB_STACK_BIN`` to the executable built from eb-stack 0.5.0 (tag
+``v0.5.0``, e368fa9). The test is skipped when that
 variable is unset. The filesystem under test is whatever the temporary
 directory uses, which on the recorded run is ext4. This is not a General
 Parallel File System acceptance test.

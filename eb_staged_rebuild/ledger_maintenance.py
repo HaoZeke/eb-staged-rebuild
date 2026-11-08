@@ -65,6 +65,11 @@ _OBSERVED_TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _MANIFEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 _ANCHOR_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})\.head\.json$")
+# The line eb-stack prints after a verify receipt: the tile log beside the
+# ledger extends the head it checked.
+_TILE_LOG = re.compile(r"^tile log size (\d+) root ([0-9a-f]{64}) extends the head and holds the same lines$")
+# The line eb-stack prints after a head receipt: the checkpoint it wrote.
+_CHECKPOINT = re.compile(r"^checkpoint \S+ size (\d+) root ([0-9a-f]{64}) to .+$")
 _STAGING_PREFIX = ".anchor-staging-"
 
 
@@ -326,12 +331,21 @@ class _Verifier:
         self.public_key = public_key
         self.timeout = timeout
 
-    def _run(self, argv, expected):
+    def _run(self, argv, expected, size, root):
+        """``expected`` is the receipt line; one tile-log line for ``size`` and ``root`` follows it."""
         code, stdout, stderr = _bounded([self.eb_stack, "ledger", "verify", *argv], self.timeout)
         if code != 0:
             raise VerificationError(f"eb-stack ledger verify exited {code}: {stderr.strip()[-500:]}")
-        if stdout != expected:
+        lines = stdout.splitlines(keepends=True)
+        tiles = _TILE_LOG.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
+        if lines[:1] != [expected] or tiles is None or tiles.groups() != (str(size), root):
             raise VerificationError(f"eb-stack ledger verify printed an unexpected receipt: {stdout[-500:]!r}")
+
+    def tiles(self, log):
+        """Write the tile log beside a private copy of ``log``; verify audits it."""
+        code, _stdout, stderr = _bounded([self.eb_stack, "ledger", "tiles", "--log", log], self.timeout)
+        if code != 0:
+            raise VerificationError(f"eb-stack ledger tiles exited {code}: {stderr.strip()[-500:]}")
 
     def binds(self, log, head_path, head, records):
         """The signed head is the root of the first ``head.size`` records of ``log``."""
@@ -342,12 +356,14 @@ class _Verifier:
             self._run(
                 ["--log", log, "--public-key", self.public_key, "--from", head_path, "--to", head_path],
                 f"the head of size 0 root {root} extends the head of size 0 root {root}\n",
+                size, root,
             )
             return
         last = size - 1
         self._run(
             ["--log", log, "--public-key", self.public_key, "--record", str(last), "--head", head_path],
             f"record {last} id {records[last]['id']} is in the head of size {size} root {root}\n",
+            size, root,
         )
 
     def extends(self, log, older_path, older, newer_path, newer):
@@ -364,6 +380,7 @@ class _Verifier:
                 ["--log", log, "--public-key", self.public_key, "--from", older_path, "--to", newer_path],
                 f"the head of size {newer['size']} root {newer['root']} extends "
                 f"the head of size {older['size']} root {older['root']}\n",
+                newer["size"], newer["root"],
             )
         except VerificationError as exc:
             raise Equivocation(f"the head of size {newer['size']} does not extend the anchored head: {exc}") from exc
@@ -715,7 +732,10 @@ def anchor(eb_stack, log, key, public_key, anchors, timeout=DEFAULT_TIMEOUT, fau
                 raise PublisherError(f"eb-stack ledger head exited {code}: {stderr.strip()[-500:]}")
             signed_bytes = _read_regular(candidate, "signed head")
             signed = parse_head(signed_bytes, "the signed head")
-            if stdout != f"signed head size {signed['size']} root {signed['root']} at {ts} to {candidate}\n":
+            lines = stdout.splitlines(keepends=True)
+            receipt = f"signed head size {signed['size']} root {signed['root']} at {ts} to {candidate}\n"
+            checkpoint = _CHECKPOINT.match(lines[1].rstrip("\n")) if len(lines) == 2 else None
+            if lines[:1] != [receipt] or checkpoint is None or checkpoint.groups() != (str(signed["size"]), signed["root"]):
                 raise PublisherError(f"eb-stack ledger head printed an unexpected receipt: {stdout[-500:]!r}")
             if signed["ts"] != ts:
                 raise PublisherError(f"eb-stack ledger head signed at {signed['ts']}, not {ts}")
