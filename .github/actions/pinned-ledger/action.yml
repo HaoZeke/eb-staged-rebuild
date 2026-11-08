@@ -1,5 +1,5 @@
 name: pinned ledger CLI
-description: Build the eb-stack 0.5.1 ledger CLI the ledger tests run against.
+description: Build the eb-stack 0.5.2 ledger CLI the ledger tests run against.
 runs:
   using: composite
   steps:
@@ -7,10 +7,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        ledger_source="$RUNNER_TEMP/eb-stack-c26282c"
-        archive="$RUNNER_TEMP/eb-stack-c26282c.tar.gz"
-        curl -fsSL --retry 3 --connect-timeout 15 https://codeload.github.com/HaoZeke/eb-stack/tar.gz/c26282cc3a1989741d448050cacecdc27cd112ee -o "$archive"
-        printf '%s  %s\n' 35a8f08c317a2f84e0cd060de26690b5b7074f5f5c235e844d80a8c3e94ccf22 "$archive" | sha256sum --check -
+        ledger_source="$RUNNER_TEMP/eb-stack-c95bdcd"
+        archive="$RUNNER_TEMP/eb-stack-c95bdcd.tar.gz"
+        curl -fsSL --retry 3 --connect-timeout 15 https://codeload.github.com/HaoZeke/eb-stack/tar.gz/c95bdcd0983a203aa097c947f9f83f89e3e9fc43 -o "$archive"
+        printf '%s  %s\n' 7aa248b8648ceefeb250cd6bec30c6ccb71364d5067930481564a517868d9a1f "$archive" | sha256sum --check -
         mkdir "$ledger_source"
         tar -xzf "$archive" --strip-components=1 -C "$ledger_source"
         rustup toolchain install 1.90.0 --profile minimal

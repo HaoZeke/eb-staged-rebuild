@@ -8,7 +8,7 @@
   history, publishes daily signed anchors, proves the anchor chain and
   projects package history from a verified log (`docs/build-events.md`,
   `docs/ledger-maintenance.md`).
-* The ledger adapter and the maintenance verifier read the eb-stack 0.5.0
+* The ledger adapter and the maintenance verifier read the eb-stack 0.5.2
   CLI: the receipt is the first line `ledger append`, `ledger head` and
   `ledger verify` print, exactly one tile-log or checkpoint line for the
   same size and root follows it (none for the size-0 head of an empty
