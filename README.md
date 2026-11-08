@@ -74,7 +74,7 @@ eb_staged_rebuild.ledger_maintenance` backfills observed history into a
 ledger, publishes daily signed anchors, proves the anchor chain, and projects
 package history from a verified log; see
 [docs/ledger-maintenance.md](docs/ledger-maintenance.md). Both speak to the
-eb-stack 0.5.2 ledger CLI: the first line a command prints is its receipt, a
+eb-stack 0.6.2 ledger CLI: the first line a command prints is its receipt, a
 tile-log or checkpoint line follows it (none for the size-0 head of an
 empty log), and `verify` audits the tile log beside the ledger.
 
@@ -123,7 +123,7 @@ Set `EB_STAGED_REBUILD_INTEGRATION=1` to enable the real EasyBuild/Lmod tests.
 With that variable set, missing `eb` or Lmod is a failure. The bubblewrap case
 skips when `bwrap` is not usable on that host.
 
-The ledger tests need `EB_STACK_BIN`, an eb-stack 0.5.2 binary, and `openssl`
+The ledger tests need `EB_STACK_BIN`, an eb-stack 0.6.2 binary, and `openssl`
 on `PATH`; `tests/test_ledger_eb_stack.py` skips without the binary, the
 build-events and ledger-maintenance suites fail without it.
 
