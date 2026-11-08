@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* EasyBuild 5.4.1 is in the bwrap key table: its `bwrap_info.json` carries
+  `bwrap_installpath_software` and `bwrap_installpath_modules`
+  (easybuild-framework-v5.4.1, `easybuild/tools/bwrap.py`), so `probe` on a
+  5.4.1 whose Python the probe cannot import reports the keys as read from
+  source instead of unknown.
+
 ## 0.3.0
 
 * Pair the local flock lock with a POSIX record lock on `.lock.posix`.

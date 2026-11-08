@@ -28,6 +28,8 @@ BWRAP_STAGE_KEYS_READ_FROM_SOURCE = {
     (5, 3, 0): False,
     (5, 3, 1): False,
     (5, 4, 0): True,
+    # easybuild-framework-v5.4.1, easybuild/tools/bwrap.py lines 49-51.
+    (5, 4, 1): True,
     (5, 4, 2): True,
 }
 LEGACY_BWRAP_LAYOUT = {(5, 3, 0), (5, 3, 1)}

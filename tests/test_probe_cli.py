@@ -11,7 +11,12 @@ from eb_staged_rebuild.cli import main
 
 from eb_staged_rebuild.lockfile import FileLock
 from eb_staged_rebuild.errors import Refused
-from eb_staged_rebuild.probe import probe_all, probe_rename_exchange
+from eb_staged_rebuild.probe import (
+    BWRAP_STAGE_KEYS_READ_FROM_SOURCE,
+    probe_all,
+    probe_rename_exchange,
+    stage_paths_from_bwrap_info,
+)
 
 
 def _write(path, text):
@@ -142,6 +147,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(body["root"], install)
             self.assertTrue(body["complete"])
 
+
+class BwrapKeyTableTests(unittest.TestCase):
+    def test_easybuild_5_4_1_writes_the_stage_path_keys(self):
+        self.assertTrue(BWRAP_STAGE_KEYS_READ_FROM_SOURCE[(5, 4, 1)])
+        info = {
+            "bwrap_cmd": ["bwrap", "--bind", "/", "/"],
+            "bwrap_installpath": "/stage",
+            "bwrap_installpath_software": "/stage/software",
+            "bwrap_installpath_modules": "/stage/modules",
+        }
+        software, modules, source = stage_paths_from_bwrap_info(info, (5, 4, 1), "/stage")
+        self.assertEqual((software, modules, source), ("/stage/software", "/stage/modules", "bwrap_info"))
+
+    def test_easybuild_5_4_1_without_the_keys_is_refused_not_guessed(self):
+        info = {"bwrap_cmd": ["bwrap"], "bwrap_installpath": "/stage"}
+        with self.assertRaises(Refused):
+            stage_paths_from_bwrap_info(info, (5, 4, 1), "/stage")
 
 if __name__ == "__main__":
     unittest.main()
