@@ -421,7 +421,9 @@ def read_verified(eb_stack, log, head, public_key, timeout=DEFAULT_TIMEOUT):
         copy_head = os.path.join(private, "head.json")
         _write_private(copy_log, log_bytes)
         _write_private(copy_head, head_bytes)
-        _Verifier(eb_stack, public_key, timeout).binds(copy_log, copy_head, signed, records)
+        verifier = _Verifier(eb_stack, public_key, timeout)
+        verifier.tiles(copy_log)
+        verifier.binds(copy_log, copy_head, signed, records)
     return VerifiedLog(signed, records)
 
 
@@ -743,6 +745,7 @@ def anchor(eb_stack, log, key, public_key, anchors, timeout=DEFAULT_TIMEOUT, fau
             records = parse_log(snapshot, f"ledger {log}")
             verifier = _Verifier(eb_stack, public_key, timeout)
             private_log = _pin(staging, "ledger.jsonl", snapshot)
+            verifier.tiles(private_log)
             verifier.binds(private_log, candidate, signed, records)
             if prior is not None:
                 prior_path = _pin(staging, "prior.json", prior["bytes"])
@@ -784,6 +787,7 @@ def verify_anchors(eb_stack, log, public_key, anchors, timeout=DEFAULT_TIMEOUT):
     verifier = _Verifier(eb_stack, public_key, timeout)
     with tempfile.TemporaryDirectory(prefix="eb-ledger-anchors-") as private:
         private_log = _pin(private, "ledger.jsonl", snapshot)
+        verifier.tiles(private_log)
         pinned = [_pin(private, f"{number:06d}.json", item["bytes"]) for number, item in enumerate(found)]
         for number in range(1, len(found)):
             verifier.extends(private_log, pinned[number - 1], found[number - 1]["head"],
