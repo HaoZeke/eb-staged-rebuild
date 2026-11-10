@@ -1,4 +1,4 @@
-"""Diff argparse options in cli.py against README and the runbook.
+"""Diff argparse options in cli.py against the published docs.
 
 Run as a script: missing names are printed, and a clean tree prints nothing.
 """
@@ -10,7 +10,18 @@ import unittest
 from eb_staged_rebuild.cli import _parser
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOCS = ("README.md", os.path.join("docs", "runbook.md"))
+
+
+def documentation_files():
+    """README plus Markdown sources for the Sphinx site."""
+    found = [os.path.join(ROOT, "README.md")]
+    docs = os.path.join(ROOT, "docs")
+    for dirpath, dirnames, filenames in os.walk(docs):
+        dirnames[:] = [name for name in dirnames if name not in {"_build", "examples", "orgmode"}]
+        for name in filenames:
+            if name.endswith(".md"):
+                found.append(os.path.join(dirpath, name))
+    return found
 
 
 def argparse_names():
@@ -37,8 +48,8 @@ def argparse_names():
 
 def missing_from_docs():
     text = []
-    for relative in DOCS:
-        with open(os.path.join(ROOT, relative), encoding="utf-8") as handle:
+    for path in documentation_files():
+        with open(path, encoding="utf-8") as handle:
             text.append(handle.read())
     combined = "\n".join(text)
     missing = []
@@ -60,7 +71,7 @@ def main():
 
 
 class CliDocTests(unittest.TestCase):
-    def test_readme_and_runbook_name_every_cli_option(self):
+    def test_docs_name_every_cli_option(self):
         self.assertEqual(missing_from_docs(), [])
 
 

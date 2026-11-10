@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Stand-in EasyBuild used by the documentation walk-through.
+
+It answers the two requests eb-staged-rebuild sends:
+
+* ``--dry-run`` prints one module line for ``demo/1``.
+* ``--installpath-software`` and ``--installpath-modules`` write a complete
+  generation: a ``PAYLOAD`` file, ``easybuild/demo-1.eb``, and a Lua module
+  whose ``root`` is that staged directory.
+
+``EB_STANDIN_FAIL=1`` exits 3 before writing. ``--version`` prints this
+program's name. It does not claim to be EasyBuild.
+"""
+
+import os
+import sys
+
+
+REL = "demo/1"
+PAYLOAD = "payload-v2\n"
+
+
+def _option(args, name):
+    prefix = name + "="
+    for arg in args:
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return None
+
+
+def _write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def main(argv):
+    if "--version" in argv:
+        print("eb-standin")
+        return 0
+    if "--dry-run" in argv:
+        print("Dry run: printing build status of easyconfigs")
+        print(f" * [R] demo-1.eb (module: {REL})")
+        return 0
+    if os.environ.get("EB_STANDIN_FAIL") == "1":
+        print("eb-standin: forced failure", file=sys.stderr)
+        return 3
+    software = _option(argv, "--installpath-software")
+    modules = _option(argv, "--installpath-modules")
+    if not software or not modules:
+        print("eb-standin: pass --installpath-software and --installpath-modules", file=sys.stderr)
+        return 2
+    generation = os.path.join(software, REL)
+    _write(os.path.join(generation, "PAYLOAD"), PAYLOAD)
+    _write(os.path.join(generation, "easybuild", "demo-1.eb"), "name = 'demo'\nversion = '1'\n")
+    module = os.path.join(modules, "all", REL + ".lua")
+    root = os.path.join(software, REL)
+    _write(
+        module,
+        f'local root = "{root}"\n'
+        'conflict("demo")\n'
+        'setenv("EBROOTDEMO", root)\n'
+        'setenv("EBVERSIONDEMO", "1")\n',
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

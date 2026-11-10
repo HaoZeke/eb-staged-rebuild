@@ -78,7 +78,7 @@ python3 -m eb_staged_rebuild.build_events \
 =finished= or =aborted= record after it, through an outbox that survives a
 crash; exit 75 means an event is still pending, and the same command
 delivers it. Every field of the config and the metadata is in
-[[file:../../build-events.md][docs/build-events.md]].
+[[file:../../howto/build-events.md][docs/howto/build-events.md]].
 
 #+begin_src sh
 python3 -m eb_staged_rebuild.ledger_maintenance anchor \
@@ -91,7 +91,7 @@ python3 -m eb_staged_rebuild.ledger_maintenance anchor \
 chain (=verify-anchors=), backfills observed history from a pinned manifest
 (=backfill=) and writes package history from a verified log (=project=).
 The commands, their refusals and their exit codes are in
-[[file:../../ledger-maintenance.md][docs/ledger-maintenance.md]].
+[[file:../../howto/ledger.md][docs/howto/ledger.md]].
 
 * Recover or roll back
 

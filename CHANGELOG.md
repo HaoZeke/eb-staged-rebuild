@@ -33,8 +33,8 @@
   `aborted` ledger events around one build command through a durable
   outbox, and `eb_staged_rebuild.ledger_maintenance` backfills observed
   history, publishes daily signed anchors, proves the anchor chain and
-  projects package history from a verified log (`docs/build-events.md`,
-  `docs/ledger-maintenance.md`).
+  projects package history from a verified log (`docs/howto/build-events.md`,
+  `docs/howto/ledger.md`).
 * The ledger adapter and the maintenance verifier read the eb-stack 0.5.2
   CLI: the receipt is the first line `ledger append`, `ledger head` and
   `ledger verify` print, exactly one tile-log or checkpoint line for the
