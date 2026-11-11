@@ -18,6 +18,10 @@ ACL_ATTRIBUTES = (
 
 _NO_DATA = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
 _NOT_PROVIDED = _NO_DATA | {errno.ENOTSUP, errno.EOPNOTSUPP}
+# NFSv4-family names only. EINVAL on an unlisted probe is suppressed solely
+# when the same inspection also lists a POSIX access ACL that is read below.
+_NFS4_FAMILY = frozenset({"system.gpfs_nfs4_acl", "system.nfs4_acl"})
+_POSIX_ACCESS = "system.posix_acl_access"
 
 Metadata = namedtuple("Metadata", "info acls")
 
@@ -64,8 +68,21 @@ def _read_all_acls(fd):
                 if error.errno in _NO_DATA:
                     raise Refused(f"{name} was listed but is no longer readable") from error
                 raise
-            if error.errno not in _NOT_PROVIDED:
-                raise
+            if error.errno in _NOT_PROVIDED:
+                continue
+            # Narrow compatibility: unlisted NFSv4-family EINVAL only when
+            # this inspection lists POSIX access (read below; missing POSIX
+            # bytes fail closed). Never suppress EINVAL for POSIX itself,
+            # listed NFSv4 names, or denied/other errors.
+            if (
+                error.errno == errno.EINVAL
+                and name in _NFS4_FAMILY
+                and _POSIX_ACCESS in listed
+            ):
+                continue
+            raise
+    if _POSIX_ACCESS in listed and _POSIX_ACCESS not in acls:
+        raise Refused(f"{_POSIX_ACCESS} was listed but is no longer readable")
     return acls
 
 
