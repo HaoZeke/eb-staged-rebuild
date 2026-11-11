@@ -2,7 +2,7 @@
 
 The runtime is Linux. Publication uses `renameat2`, a local `flock`, a POSIX record lock, and `/proc` to confirm that a build's process group has stopped. Python 3.11 or newer is required. The package has no third-party dependencies.
 
-`eb-staged-rebuild --version` prints `eb_staged_rebuild.__version__`. In this tree that value is 0.4.1. The `version` field in `pyproject.toml` is 0.4.3. The changelog records the 0.4.3 behaviour.
+`eb-staged-rebuild --version` prints `eb_staged_rebuild.__version__`. The command and the distribution metadata both identify version 0.4.4. The changelog records the release behaviour.
 
 ## From a checkout
 
@@ -14,7 +14,7 @@ eb-staged-rebuild --version
 ```
 
 ```text
-eb-staged-rebuild 0.4.1
+eb-staged-rebuild 0.4.4
 ```
 
 A development install that also pulls the documentation tools is:

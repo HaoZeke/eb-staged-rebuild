@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.4
+
+* Restore the required access control list before removing inherited
+  virtual ACL views, retaining the selected publication policy.
+* Accept an unlisted NFSv4-family EINVAL probe only when the same inspection
+  lists a readable POSIX access ACL. Listed, denied and POSIX failures
+  remain errors.
+* Keep the command's reported version consistent with the distribution
+  metadata.
+
 ## 0.4.3
 
 * From the `fix/cluster-record-lock` line, on the directory-swap model: a
