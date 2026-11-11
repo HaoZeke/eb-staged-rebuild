@@ -111,13 +111,6 @@ def _restore_metadata(fd, metadata, mode):
     if metadata is None:
         os.fchmod(fd, mode)
         return
-    for _ in ACL_ATTRIBUTES:
-        present = read_acls(fd)
-        extra = [name for name in ACL_ATTRIBUTES if name in present and name not in metadata.acls]
-        if not extra:
-            break
-        # Removing a native ACL can also remove the views derived from it.
-        os.removexattr(fd, extra[0])
     os.fchown(fd, metadata.info.st_uid, metadata.info.st_gid)
     os.fchmod(fd, mode)
     primary = next((name for name in ACL_ATTRIBUTES if name in metadata.acls), None)
@@ -125,6 +118,14 @@ def _restore_metadata(fd, metadata, mode):
     # Writing it can materialize an additional native ACL on GPFS.
     if primary is not None and read_acls(fd) != metadata.acls:
         os.setxattr(fd, primary, metadata.acls[primary])
+    # Applying the required ACL can replace inherited virtual views.
+    for _ in ACL_ATTRIBUTES:
+        present = read_acls(fd)
+        extra = [name for name in ACL_ATTRIBUTES if name in present and name not in metadata.acls]
+        if not extra:
+            break
+        # Removing a native ACL can also remove the views derived from it.
+        os.removexattr(fd, extra[0])
     restored = os.fstat(fd)
     if (restored.st_uid, restored.st_gid, stat.S_IMODE(restored.st_mode)) != (
         metadata.info.st_uid, metadata.info.st_gid, mode
