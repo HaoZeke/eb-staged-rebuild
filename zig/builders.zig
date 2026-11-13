@@ -195,3 +195,11 @@ test "runCommand reports a command that cannot be executed" {
     try std.testing.expectError(error.ExecFailed, runCommand(a, "/", &.{"/"}, envp, .{}, "prepare.invoke"));
     try std.testing.expectEqual(linux.E.ACCES, exec_errno);
 }
+
+test "a command killed by a signal has a shell exit status" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const envp: common.proc.Envp = &[_:null]?[*:0]const u8{};
+    try std.testing.expectEqual(@as(u8, 128 + 15), try runCommand(a, "/bin/sh", &.{ "sh", "-c", "kill -TERM $$" }, envp, .{}, "child.signal"));
+}

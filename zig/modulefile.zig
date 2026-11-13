@@ -292,3 +292,12 @@ test "loads, identity and rewriting" {
     try std.testing.expectEqualStrings("local root = \"/live/demo/1\"\nsetenv(\"X\", \"/live/demo/1/bin\")\nsetenv(\"Y\", \"/s/demo/10\")\n", t);
     try std.testing.expectError(error.Refused, rewriteRoot(a, "x", "/y", &why));
 }
+
+test "a new path that contains the old path is not doubled" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var why: []const u8 = "";
+    const t = try replacePath(a, "local root = \"/opt/software/demo/1\"\n", "/opt/software/demo/1", "/opt/software/demo/1/gen", &why);
+    try std.testing.expectEqualStrings("local root = \"/opt/software/demo/1/gen\"\n", t);
+}
