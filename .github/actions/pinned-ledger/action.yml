@@ -9,7 +9,7 @@ runs:
         set -euo pipefail
         ledger_source="$RUNNER_TEMP/eb-stack-defb6ae"
         archive="$RUNNER_TEMP/eb-stack-defb6ae.tar.gz"
-        curl -fsSL --retry 3 --connect-timeout 15 https://codeload.github.com/HaoZeke/eb-stack/tar.gz/defb6ae742ef9a56c23aa12280745423c8d46b9a -o "$archive"
+        curl -fsSL --retry 3 --connect-timeout 15 https://codeload.github.com/stackhands/eb-stack/tar.gz/defb6ae742ef9a56c23aa12280745423c8d46b9a -o "$archive"
         printf '%s  %s\n' 002f37ce87cf63115709035b84203a3f0d8fd6d79d031476bfb23e3af01bc730 "$archive" | sha256sum --check -
         mkdir "$ledger_source"
         tar -xzf "$archive" --strip-components=1 -C "$ledger_source"

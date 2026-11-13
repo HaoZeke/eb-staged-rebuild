@@ -1,6 +1,6 @@
 """Directory-swap publication records use the eb-stack ledger field set.
 
-The checker mirrors ``check_fields`` in HaoZeke/eb-stack ``src/ledger.rs`` at
+The checker mirrors ``check_fields`` in stackhands/eb-stack ``src/ledger.rs`` at
 ``79f7f8a4``. eb-stack itself is not modified or executed here.
 """
 
