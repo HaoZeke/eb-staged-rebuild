@@ -31,13 +31,35 @@ fn kindOf(p: []const u8) []const u8 {
     return main_mod.lstatKind(p);
 }
 
+/// The calls a swap makes. Replaceable in the same builds as atomic.ops
+/// (tests, a -Dtest-ops artifact), so a test can fail one of them the way
+/// the Python tests pass their own rename and exchange_call; constant real
+/// calls in any other build.
+pub const Ops = struct {
+    exchange: *const fn (first: [:0]const u8, second: [:0]const u8) linux.E = realExchange,
+    rename: *const fn (from: []const u8, to: []const u8) sys.Error!void = realRename,
+    sync_dir: *const fn (path: []const u8) sys.Error!void = atomic.fsyncDir,
+};
+
+var test_ops: Ops = .{};
+const real_ops: Ops = .{};
+pub const ops = if (atomic.replaceable) &test_ops else &real_ops;
+
+fn realExchange(first: [:0]const u8, second: [:0]const u8) linux.E {
+    return linux.errno(linux.renameat2(linux.AT.FDCWD, first.ptr, linux.AT.FDCWD, second.ptr, .{ .EXCHANGE = true }));
+}
+
+fn realRename(from: []const u8, to: []const u8) sys.Error!void {
+    return sys.renameat(common.fsx.cwd, from, common.fsx.cwd, to);
+}
+
 fn renamePath(a: Allocator, from: []const u8, to: []const u8, why: *Why) Error!void {
-    sys.renameat(common.fsx.cwd, from, common.fsx.cwd, to) catch |err|
+    ops.rename(from, to) catch |err|
         return fail(a, why, error.Failed, "{s}", .{main_mod.osError(a, err, from)});
 }
 
 fn syncParent(a: Allocator, live: []const u8, why: *Why) Error!void {
-    atomic.fsyncDir(std.fs.path.dirname(live) orelse "/") catch |err|
+    ops.sync_dir(std.fs.path.dirname(live) orelse "/") catch |err|
         return fail(a, why, error.Failed, "{s}", .{main_mod.osError(a, err, live)});
 }
 
@@ -75,7 +97,7 @@ fn exchange(a: Allocator, first: []const u8, second: []const u8) linux.E {
     const x = sys.z(&za, first) catch return .NAMETOOLONG;
     const y = sys.z(&zb, second) catch return .NAMETOOLONG;
     _ = a;
-    return linux.errno(linux.renameat2(linux.AT.FDCWD, x.ptr, linux.AT.FDCWD, y.ptr, .{ .EXCHANGE = true }));
+    return ops.exchange(x, y);
 }
 
 fn strerror(e: linux.E) []const u8 {
@@ -158,4 +180,153 @@ test "swap exchanges two sibling directories and back" {
         try std.testing.expectEqualStrings("dir", kindOf(try std.fmt.allocPrint(a, "{s}/L", .{live})));
     }
     try std.testing.expectError(error.Refused, swapDirectories(a, live, base, true, .{}, "swap", &why));
+}
+
+// Ports of tests/test_swap.py. Each failure the Python test raises through
+// its own rename or exchange_call (or a FaultInjector before that call) is
+// the same call failing here through `ops`.
+const testing = std.testing;
+
+const Pair = struct { base: []const u8, live: []const u8, staged: []const u8 };
+
+fn testPair(a: Allocator, name: []const u8) !Pair {
+    const base = try std.fmt.allocPrint(a, "/tmp/esr-swap-{s}-{d}", .{ name, linux.getpid() });
+    common.fsx.deleteTree(a, common.fsx.cwd, base) catch {};
+    const live = try std.fmt.allocPrint(a, "{s}/live", .{base});
+    const staged = try std.fmt.allocPrint(a, "{s}/.live.staged", .{base});
+    try atomic.makedirs(live);
+    try atomic.makedirs(staged);
+    var why: atomic.Why = .{};
+    try atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{live}), "old\n", .{}, &why);
+    try atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{staged}), "new\n", .{}, &why);
+    return .{ .base = base, .live = live, .staged = staged };
+}
+
+fn payload(a: Allocator, dir: []const u8) ![]const u8 {
+    const f = try common.fsx.openRegular(common.fsx.cwd, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{dir}), false);
+    defer sys.close(f.fd);
+    return common.fsx.readAll(a, f.fd, 64);
+}
+
+fn expectOriginal(a: Allocator, p: Pair) !void {
+    try testing.expectEqualStrings("old\n", try payload(a, p.live));
+    try testing.expectEqualStrings("new\n", try payload(a, p.staged));
+    try testing.expectEqualStrings("missing", kindOf(try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged})));
+}
+
+var failing_call: usize = 0;
+var calls: usize = 0;
+
+fn failingRename(from: []const u8, to: []const u8) sys.Error!void {
+    calls += 1;
+    if (calls == failing_call) return error.Unexpected;
+    return realRename(from, to);
+}
+
+fn failingSync(path: []const u8) sys.Error!void {
+    calls += 1;
+    if (calls == failing_call) return error.Unexpected;
+    return atomic.fsyncDir(path);
+}
+
+fn deniedExchange(_: [:0]const u8, _: [:0]const u8) linux.E {
+    return .PERM;
+}
+
+fn unsupportedExchange(_: [:0]const u8, _: [:0]const u8) linux.E {
+    return .OPNOTSUPP;
+}
+
+test "an exchange whose sync fails is exchanged back" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const p = try testPair(a, "after");
+    defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+    defer ops.* = .{};
+    calls = 0;
+    failing_call = 1;
+    ops.sync_dir = failingSync;
+    var why: Why = .{};
+    try testing.expectError(error.Failed, swapDirectories(a, p.live, p.staged, true, .{}, "swap", &why));
+    ops.* = .{};
+    try expectOriginal(a, p);
+}
+
+test "an exchange error other than unsupported leaves live unchanged" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const p = try testPair(a, "denied");
+    defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+    defer ops.* = .{};
+    ops.exchange = deniedExchange;
+    var why: Why = .{};
+    try testing.expectError(error.Failed, swapDirectories(a, p.live, p.staged, true, .{}, "swap", &why));
+    try testing.expectEqualStrings("[Errno 1] renameat2(RENAME_EXCHANGE): Operation not permitted", why.msg);
+    ops.* = .{};
+    try expectOriginal(a, p);
+}
+
+test "an unsupported exchange uses the fallback" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const p = try testPair(a, "unsupported");
+    defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+    defer ops.* = .{};
+    ops.exchange = unsupportedExchange;
+    var why: Why = .{};
+    try testing.expectEqual(Method.@"rename-fallback", try swapDirectories(a, p.live, p.staged, true, .{}, "swap", &why));
+    ops.* = .{};
+    try testing.expectEqualStrings("new\n", try payload(a, p.live));
+    try testing.expectEqualStrings("old\n", try payload(a, p.staged));
+}
+
+test "every failed fallback rename or sync restores live" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    defer ops.* = .{};
+    // Calls 1-3 are the three renames, call 4 the parent sync.
+    for (1..5) |k| {
+        const p = try testPair(a, "fallback");
+        defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+        calls = 0;
+        failing_call = k;
+        ops.rename = failingRename;
+        ops.sync_dir = if (k == 4) failingSync else atomic.fsyncDir;
+        if (k == 4) calls = 3;
+        var why: Why = .{};
+        try testing.expectError(error.Failed, swapDirectories(a, p.live, p.staged, false, .{}, "swap", &why));
+        ops.* = .{};
+        try expectOriginal(a, p);
+    }
+}
+
+test "recovery after the first fallback rename" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const p = try testPair(a, "recover1");
+    defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+    const hold = try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged});
+    try realRename(p.live, hold);
+    var why: Why = .{};
+    try recoverInterrupted(a, p.live, p.staged, &why);
+    try expectOriginal(a, p);
+}
+
+test "recovery after the second fallback rename" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const p = try testPair(a, "recover2");
+    defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
+    const hold = try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged});
+    try realRename(p.live, hold);
+    try realRename(p.staged, p.live);
+    var why: Why = .{};
+    try recoverInterrupted(a, p.live, p.staged, &why);
+    try expectOriginal(a, p);
 }
