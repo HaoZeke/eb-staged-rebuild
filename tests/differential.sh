@@ -149,7 +149,7 @@ fixture() {
     mkdir -p "${root}/software/kept/.3.0001" "${root}/software/kept/3" "${root}/modules/all/kept" "${root}/state/runs/r9"
     ln -s .3.0001 "${root}/software/kept/alias"
     printf 'local root = "%s/software/kept/alias"\n' "${root}" > "${root}/modules/all/kept/3.lua"
-    printf '{"schema": 2, "run_id": "r9", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "kept/3", "status": "published", "live_software": "%s/software/kept/3", "retired": "%s/software/kept/.3.0001", "published_at": 1000.5}]}\n' "${root}" "${root}" > "${root}/state/runs/r9/journal.json"
+    printf '{"schema": 2, "run_id": "r9", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "kept/3", "status": "published", "live_software": "%s/software/kept/3", "retired": "%s/software/kept/.3.0001", "live_module": "%s/modules/all/kept/3.lua", "published_at": 1000.5}]}\n' "${root}" "${root}" "${root}" > "${root}/state/runs/r9/journal.json"
     # Publication policies for --prepare.
     printf '#!/bin/sh\nexit 42\n' > "${root}/prepare-fails"
     printf '#!/bin/sh\ncount=0\n[ -f "%s/prepare-count" ] && count=$(cat "%s/prepare-count")\necho $((count + 1)) > "%s/prepare-count"\nexit 0\n' "${root}" "${root}" "${root}" > "${root}/prepare-ok"
@@ -181,8 +181,8 @@ compare_admin() {
             (cd "${root}" && "${cmd[@]}" "${args[@]}") > "${out}.out" 2> "${out}.err"
         fi
         echo $? > "${out}.rc"
-        find "${root}" -name journal.json -print0 | sort -z | xargs -0 -r cat > "${out}.journals"
-        (cd "${root}" && find . -not -name '.lock*' | sort) > "${out}.tree"
+        find "${root}" -name journal.json -print0 2>/dev/null | sort -z | xargs -0 -r cat > "${out}.journals"
+        (cd "${root}" && find . -not -name '.lock*' 2>/dev/null | sort) > "${out}.tree"
         for f in out err journals tree; do norm < "${out}.${f}" > "${out}.${f}.n"; done
     done
     for f in rc out.n err.n journals.n tree.n; do
@@ -201,6 +201,11 @@ compare_admin "retire" retire --state-root @ROOT@/state --module-file @ROOT@/mod
 compare_admin "retire again" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua
 compare_admin "status after retire" status --state-root @ROOT@/state
 compare_admin "gc keeps within grace" gc --state-root @ROOT@/state --dry-run
+if [ "$(id -u)" != 0 ]; then
+    for impl in py zig; do chmod 0 "${work}/${impl}/modules/all/kept"; done
+    compare_admin "gc, an unreadable live module" gc --state-root @ROOT@/state --grace-hours 0
+    for impl in py zig; do chmod 755 "${work}/${impl}/modules/all/kept"; done
+fi
 compare_admin "gc removes past grace" gc --state-root @ROOT@/state --grace-hours 0
 compare_admin "gc again" gc --state-root @ROOT@/state --grace-hours 0
 compare_admin "rollback the retire" rollback --state-root @ROOT@/state @RETIRE@
@@ -257,6 +262,14 @@ compare_admin "rollback over a new module file" rollback --state-root @ROOT@/sta
 for impl in py zig; do rm "${work}/${impl}/modules/all/demo/1.lua"; done
 compare_admin "rollback after the new file is gone" rollback --state-root @ROOT@/state @RETIRE@
 compare_admin "gc after the retire is rolled back" gc --state-root @ROOT@/state --grace-hours 0
+# A software directory another tracked module still names is kept: the
+# alias is tracked through a rolled-back retire, then the module is retired.
+for impl in py zig; do cp "${work}/${impl}/modules/all/demo/1.lua" "${work}/${impl}/modules/all/demo/alias.lua"; done
+compare_admin "retire an alias" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/alias.lua
+compare_admin "rollback the alias retire" rollback --state-root @ROOT@/state @RETIRE@
+compare_admin "retire the module again" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua
+compare_admin "gc keeps a directory a live module names" gc --state-root @ROOT@/state --grace-hours 0 --dry-run
+compare_admin "rollback the module retire" rollback --state-root @ROOT@/state @RETIRE@
 if [ -d /dev/shm ] && [ -w /dev/shm ]; then
     shm=$(mktemp -d /dev/shm/esr-diff.XXXXXX)
     compare_admin "retire, state root on another filesystem" retire --state-root "${shm}/state" --module-file @ROOT@/modules/all/link/1.lua
@@ -270,7 +283,7 @@ compare_admin "run, missing prepare" run --software @ROOT@/software --modules @R
 compare_admin "run, prepare fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r12 --skip-live-check --prepare @ROOT@/prepare-fails --module demo/1 -- demo-1.eb
 for impl in py zig; do cp "${work}/${impl}/prepare-ok" "${work}/${impl}/prepare-fails"; done
 compare_admin "resume after the prepare is fixed" resume --state-root @ROOT@/state r12
-compare_admin "the prepare ran once" cat @ROOT@/prepare-count
+compare_admin "the prepare ran once" env cat @ROOT@/prepare-count
 compare_admin "rollback a prepared run" rollback --state-root @ROOT@/state r12
 unset NORM_HASH
 
