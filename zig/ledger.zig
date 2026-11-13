@@ -142,16 +142,30 @@ const Parser = struct {
         while (p.i < p.s.len and (p.s[p.i] == ' ' or p.s[p.i] == '\t' or p.s[p.i] == '\n' or p.s[p.i] == '\r')) p.i += 1;
     }
 
-    fn syntax(p: *Parser, comptime msg: []const u8) Fail {
-        return refuse("{s} is not JSON: " ++ msg ++ " (char {d})", .{ p.what, p.i });
+    /// json.JSONDecodeError's text: MSG: line L column C (char N), counted
+    /// in characters as Python counts them.
+    fn syntaxAt(p: *Parser, comptime msg: []const u8, at: usize) Fail {
+        var chars: usize = 0;
+        var line: usize = 1;
+        var line_start: usize = 0;
+        var i: usize = 0;
+        while (i < at and i < p.s.len) : (i += 1) {
+            if (p.s[i] & 0xc0 == 0x80) continue;
+            if (p.s[i] == '\n') {
+                line += 1;
+                line_start = chars + 1;
+            }
+            chars += 1;
+        }
+        return refuse("{s} is not JSON: " ++ msg ++ ": line {d} column {d} (char {d})", .{ p.what, line, chars - line_start + 1, chars });
     }
 
     fn value(p: *Parser) Fail!V {
         p.ws();
-        if (p.i >= p.s.len) return p.syntax("Expecting value");
+        if (p.i >= p.s.len) return p.syntaxAt("Expecting value", p.i);
         p.depth += 1;
         defer p.depth -= 1;
-        if (p.depth > 512) return p.syntax("nested too deeply");
+        if (p.depth > 512) return p.syntaxAt("Expecting value", p.i);
         const c = p.s[p.i];
         switch (c) {
             '{' => return p.object(),
@@ -163,18 +177,18 @@ const Parser = struct {
             'N' => return p.constant("NaN"),
             'I' => return p.constant("Infinity"),
             '-', '0'...'9' => return p.number(),
-            else => return p.syntax("Expecting value"),
+            else => return p.syntaxAt("Expecting value", p.i),
         }
     }
 
     fn literal(p: *Parser, comptime word: []const u8, v: V) Fail!V {
-        if (!std.mem.startsWith(u8, p.s[p.i..], word)) return p.syntax("Expecting value");
+        if (!std.mem.startsWith(u8, p.s[p.i..], word)) return p.syntaxAt("Expecting value", p.i);
         p.i += word.len;
         return v;
     }
 
     fn constant(p: *Parser, comptime word: []const u8) Fail!V {
-        if (!std.mem.startsWith(u8, p.s[p.i..], word)) return p.syntax("Expecting value");
+        if (!std.mem.startsWith(u8, p.s[p.i..], word)) return p.syntaxAt("Expecting value", p.i);
         return refuse("{s} holds the non-integer number {s}", .{ p.what, word });
     }
 
@@ -184,7 +198,7 @@ const Parser = struct {
             p.i += 1;
             if (std.mem.startsWith(u8, p.s[p.i..], "Infinity")) return refuse("{s} holds the non-integer number -Infinity", .{p.what});
         }
-        if (p.i >= p.s.len or !std.ascii.isDigit(p.s[p.i])) return p.syntax("Expecting value");
+        if (p.i >= p.s.len or !std.ascii.isDigit(p.s[p.i])) return p.syntaxAt("Expecting value", start);
         if (p.s[p.i] == '0') p.i += 1 else while (p.i < p.s.len and std.ascii.isDigit(p.s[p.i])) p.i += 1;
         var float = false;
         if (p.i < p.s.len and p.s[p.i] == '.' and p.i + 1 < p.s.len and std.ascii.isDigit(p.s[p.i + 1])) {
@@ -207,31 +221,34 @@ const Parser = struct {
         return .{ .int = n };
     }
 
-    fn hex4(p: *Parser) Fail!u21 {
-        if (p.i + 4 > p.s.len) return p.syntax("Invalid \\uXXXX escape");
-        const v = std.fmt.parseInt(u16, p.s[p.i .. p.i + 4], 16) catch return p.syntax("Invalid \\uXXXX escape");
+    fn hex4(p: *Parser, u_at: usize) Fail!u21 {
+        if (p.i + 4 > p.s.len) return p.syntaxAt("Invalid \\uXXXX escape", u_at);
+        for (p.s[p.i .. p.i + 4]) |c| if (!std.ascii.isHex(c)) return p.syntaxAt("Invalid \\uXXXX escape", u_at);
+        const v = std.fmt.parseInt(u16, p.s[p.i .. p.i + 4], 16) catch unreachable;
         p.i += 4;
         return v;
     }
 
     fn string(p: *Parser) Fail![]const u8 {
+        const begin = p.i;
         p.i += 1; // opening quote
         var out: std.ArrayList(u8) = .empty;
         while (true) {
-            if (p.i >= p.s.len) return p.syntax("Unterminated string starting at");
+            if (p.i >= p.s.len) return p.syntaxAt("Unterminated string starting at", begin);
             const c = p.s[p.i];
             if (c == '"') {
                 p.i += 1;
                 return out.items;
             }
-            if (c < 0x20) return p.syntax("Invalid control character at");
+            if (c < 0x20) return p.syntaxAt("Invalid control character at", p.i);
             if (c != '\\') {
                 try out.append(p.a, c);
                 p.i += 1;
                 continue;
             }
+            const backslash = p.i;
             p.i += 1;
-            if (p.i >= p.s.len) return p.syntax("Unterminated string starting at");
+            if (p.i >= p.s.len) return p.syntaxAt("Unterminated string starting at", begin);
             const e = p.s[p.i];
             p.i += 1;
             const simple: ?u8 = switch (e) {
@@ -244,17 +261,20 @@ const Parser = struct {
                 'r' => '\r',
                 't' => '\t',
                 'u' => null,
-                else => return p.syntax("Invalid \\escape"),
+                else => return p.syntaxAt("Invalid \\escape", backslash),
             };
             if (simple) |b| {
                 try out.append(p.a, b);
                 continue;
             }
-            var cp = try p.hex4();
+            var cp = try p.hex4(backslash + 1);
             if (cp >= 0xd800 and cp < 0xdc00 and p.i + 6 <= p.s.len and p.s[p.i] == '\\' and p.s[p.i + 1] == 'u') {
                 const save = p.i;
                 p.i += 2;
-                const lo = try p.hex4();
+                const lo = p.hex4(save + 1) catch {
+                    p.i = save;
+                    return p.syntaxAt("Invalid \\uXXXX escape", save + 1);
+                };
                 if (lo >= 0xdc00 and lo < 0xe000) {
                     cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
                 } else p.i = save;
@@ -277,16 +297,15 @@ const Parser = struct {
         while (true) {
             try items.append(p.a, try p.value());
             p.ws();
-            if (p.i >= p.s.len) return p.syntax("Expecting ',' delimiter");
-            if (p.s[p.i] == ',') {
-                p.i += 1;
-                continue;
-            }
-            if (p.s[p.i] == ']') {
+            if (p.i < p.s.len and p.s[p.i] == ']') {
                 p.i += 1;
                 return .{ .arr = items.items };
             }
-            return p.syntax("Expecting ',' delimiter");
+            if (p.i >= p.s.len or p.s[p.i] != ',') return p.syntaxAt("Expecting ',' delimiter", p.i);
+            const comma = p.i;
+            p.i += 1;
+            p.ws();
+            if (p.i < p.s.len and p.s[p.i] == ']') return p.syntaxAt("Illegal trailing comma before end of array", comma);
         }
     }
 
@@ -299,26 +318,24 @@ const Parser = struct {
             return .{ .obj = members.items };
         }
         while (true) {
-            p.ws();
-            if (p.i >= p.s.len or p.s[p.i] != '"') return p.syntax("Expecting property name enclosed in double quotes");
+            if (p.i >= p.s.len or p.s[p.i] != '"') return p.syntaxAt("Expecting property name enclosed in double quotes", p.i);
             const key = try p.string();
             p.ws();
-            if (p.i >= p.s.len or p.s[p.i] != ':') return p.syntax("Expecting ':' delimiter");
+            if (p.i >= p.s.len or p.s[p.i] != ':') return p.syntaxAt("Expecting ':' delimiter", p.i);
             p.i += 1;
             const v = try p.value();
             for (members.items) |m| if (std.mem.eql(u8, m.key, key)) return refuse("{s} repeats the key {s}", .{ p.what, repr(p.a, key) });
             try members.append(p.a, .{ .key = key, .val = v });
             p.ws();
-            if (p.i >= p.s.len) return p.syntax("Expecting ',' delimiter");
-            if (p.s[p.i] == ',') {
-                p.i += 1;
-                continue;
-            }
-            if (p.s[p.i] == '}') {
+            if (p.i < p.s.len and p.s[p.i] == '}') {
                 p.i += 1;
                 return .{ .obj = members.items };
             }
-            return p.syntax("Expecting ',' delimiter");
+            if (p.i >= p.s.len or p.s[p.i] != ',') return p.syntaxAt("Expecting ',' delimiter", p.i);
+            const comma = p.i;
+            p.i += 1;
+            p.ws();
+            if (p.i < p.s.len and p.s[p.i] == '}') return p.syntaxAt("Illegal trailing comma before end of object", comma);
         }
     }
 };
@@ -329,7 +346,7 @@ pub fn strictJson(a: Allocator, text: []const u8, what: []const u8) Fail!V {
     var p: Parser = .{ .a = a, .s = text, .what = what };
     const v = try p.value();
     p.ws();
-    if (p.i != text.len) return p.syntax("Extra data");
+    if (p.i != text.len) return p.syntaxAt("Extra data", p.i);
     return v;
 }
 
@@ -2114,10 +2131,15 @@ fn outputDir(a: Allocator, out: []const u8, log: []const u8, head: []const u8, p
     }
 }
 
+fn reachHook(ctx: ?*anyopaque, step: []const u8) void {
+    const f: *const Faults = @ptrCast(@alignCast(ctx.?));
+    f.reach(step) catch {};
+}
+
 fn writeAtomic(a: Allocator, path: []const u8, data: []const u8, step: []const u8, faults: Faults) Fail!void {
-    try faults.reach(try std.fmt.allocPrint(a, "{s}.write", .{step}));
     var w: atomic.Why = .{};
-    atomic.atomicWrite(a, path, data, .{ .step = step }, &w) catch |err| switch (err) {
+    const hook: atomic.Faults = .{ .ctx = @ptrCast(@constCast(&faults)), .reach_fn = reachHook };
+    atomic.atomicWrite(a, path, data, .{ .step = step, .faults = hook }, &w) catch |err| switch (err) {
         error.Refused => return refuse("{s}", .{w.msg}),
         error.OutOfMemory => return error.OutOfMemory,
         else => return osFail(a, err, path),
@@ -2414,6 +2436,36 @@ test "summary and receipt lines" {
     try testing.expect(checkpointLine("checkpoint example.org/log size 4 root " ++ root ++ " to /x/y") != null);
     try testing.expect(checkpointLine("checkpoint a b size 4 root " ++ root ++ " to /x") == null);
     try testing.expect(indexCheckpointLine("index checkpoint example.org/log/index size 2 root " ++ root ++ " to /x"));
+}
+
+test "JSON errors read as Python's decoder prints them" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    why_alloc = a;
+    const cases = [_][2][]const u8{
+        .{ "{", "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)" },
+        .{ "[1,]", "Illegal trailing comma before end of array: line 1 column 3 (char 2)" },
+        .{ "{\"a\":1,}", "Illegal trailing comma before end of object: line 1 column 7 (char 6)" },
+        .{ "\"ab", "Unterminated string starting at: line 1 column 1 (char 0)" },
+        .{ "\"a\x01\"", "Invalid control character at: line 1 column 3 (char 2)" },
+        .{ "1 2", "Extra data: line 1 column 3 (char 2)" },
+        .{ "", "Expecting value: line 1 column 1 (char 0)" },
+        .{ "{\"a\" 1}", "Expecting ':' delimiter: line 1 column 6 (char 5)" },
+        .{ "[1 2]", "Expecting ',' delimiter: line 1 column 4 (char 3)" },
+        .{ "\n\n {\"a\"", "Expecting ':' delimiter: line 3 column 6 (char 7)" },
+        .{ "tru", "Expecting value: line 1 column 1 (char 0)" },
+        .{ "-", "Expecting value: line 1 column 1 (char 0)" },
+        .{ "\"\\x\"", "Invalid \\escape: line 1 column 2 (char 1)" },
+        .{ "\"\\u12\"", "Invalid \\uXXXX escape: line 1 column 3 (char 2)" },
+        .{ "{\"\u{e9}\":1 x}", "Expecting ',' delimiter: line 1 column 8 (char 7)" },
+        .{ "[1]\n\n x", "Extra data: line 3 column 2 (char 6)" },
+    };
+    for (cases) |c| {
+        try testing.expectError(error.Refused, strictJson(a, c[0], "x"));
+        const want = try std.fmt.allocPrint(a, "x is not JSON: {s}", .{c[1]});
+        try testing.expectEqualStrings(want, lastMessage());
+    }
 }
 
 test "time round trip" {
