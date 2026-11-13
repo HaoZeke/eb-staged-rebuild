@@ -665,8 +665,14 @@ fn prepareSwapSource(r: *R, m: Py, run_id: []const u8) E!void {
     } else if (!(std.mem.eql(u8, sk, "missing") and std.mem.eql(u8, rk, "dir"))) {
         return r.intervene("cannot prepare {s}: staged={s}, retired={s}", .{ s(pyfmt.get(m, "rel")), sk, rk });
     }
+    // After an exchange the journal did not record, the run's tree is live
+    // and the retired name holds the old tree; the baseline step swaps them
+    // back.
     const tid = treeRunId(r.a, retired);
-    if (tid == null or !std.mem.eql(u8, tid.?, run_id)) return r.intervene("prepared tree does not belong to run {s}: {s}", .{ run_id, retired });
+    const lid = treeRunId(r.a, s(pyfmt.get(m, "live_software")));
+    const retired_ours = tid != null and std.mem.eql(u8, tid.?, run_id);
+    const live_ours = lid != null and std.mem.eql(u8, lid.?, run_id);
+    if (!retired_ours and !live_ours) return r.intervene("prepared tree does not belong to run {s}: {s}", .{ run_id, retired });
 }
 
 fn writeNewModule(r: *R, m: Py, faults: atomic.Faults) E!void {
@@ -1291,7 +1297,19 @@ fn rollbackSteps(r: *R) E!void {
         i -= 1;
         const m = r.list("modules_plan")[i];
         const rel = s(pyfmt.get(m, "rel"));
-        const method = try swapPair(r, s(pyfmt.get(m, "live_software")), s(pyfmt.get(m, "retired")), r.faults(), try std.fmt.allocPrint(a, "rollback.swap:{s}", .{rel}));
+        const live = s(pyfmt.get(m, "live_software"));
+        const retired = s(pyfmt.get(m, "retired"));
+        try recoverPair(r, live, retired);
+        // An exchange the journal did not record already put the old tree
+        // back: this run's tree is at the retired name.
+        const lr = treeRunId(a, live);
+        const rr = treeRunId(a, retired);
+        const run_id = r.str("run_id");
+        const done_already = !(lr != null and std.mem.eql(u8, lr.?, run_id)) and (rr != null and std.mem.eql(u8, rr.?, run_id));
+        const method = if (done_already)
+            (if (s(pyfmt.get(m, "rollback_method")).len > 0) s(pyfmt.get(m, "rollback_method")) else "recovered")
+        else
+            try swapPair(r, live, retired, r.faults(), try std.fmt.allocPrint(a, "rollback.swap:{s}", .{rel}));
         r.setItem("modules_plan", i, "status", Py.s("restoring"));
         r.setItem("modules_plan", i, "rollback_method", Py.s(method));
         try r.save(try std.fmt.allocPrint(a, "journal.rollback-swap:{s}", .{rel}));
