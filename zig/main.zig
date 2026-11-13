@@ -11,6 +11,7 @@ const modulefile = @import("modulefile.zig");
 const pyfmt = @import("pyfmt.zig");
 const probe = @import("probe.zig");
 const admin = @import("admin.zig");
+const engine = @import("engine.zig");
 
 const sys = common.sys;
 const fsx = common.fsx;
@@ -576,6 +577,122 @@ fn cmdGc(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     return admin.gc(&ctx, opts[0].value.?, grace, opts[2].seen, opts[4].seen, timeout);
 }
 
+const run_usage = @embedFile("run_usage.txt");
+const run_help = @embedFile("run_help.txt");
+const backends = [_][]const u8{ "auto", "bwrap", "userns", "installpath" };
+
+/// run's options; the first word that is no option, or "--", starts the
+/// easyconfig arguments (argparse REMAINDER).
+fn cmdRun(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
+    const who = prog ++ " run";
+    const names = [_][]const u8{ "software", "modules", "state-root", "eb", "backend", "grace-hours", "dry-run", "module", "run-id", "lock-timeout", "skip-live-check", "prepare", "ledger-config" };
+    const takes = [_]bool{ true, true, true, true, true, true, false, true, true, true, false, true, true };
+    var vals: [names.len]?[]const u8 = @splat(null);
+    var seen: [names.len]bool = @splat(false);
+    var modules_list: std.ArrayList([]const u8) = .empty;
+    var rest: []const []const u8 = &.{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            cli.put(1, run_help);
+            return 0;
+        }
+        if (std.mem.eql(u8, arg, "--") or arg.len == 0 or arg[0] != '-') {
+            rest = args[i..];
+            break;
+        }
+        if (!std.mem.startsWith(u8, arg, "--")) usageError(top_usage, prog, "unrecognized arguments: {s}", .{arg});
+        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const name = arg[2 .. eq orelse arg.len];
+        var hit: ?usize = null;
+        var count: usize = 0;
+        for (names, 0..) |n, k| {
+            if (std.mem.eql(u8, n, name)) {
+                hit = k;
+                count = 1;
+                break;
+            }
+            if (std.mem.startsWith(u8, n, name)) {
+                hit = k;
+                count += 1;
+            }
+        }
+        if (count > 1) {
+            var amb: std.ArrayList(u8) = .empty;
+            for (names) |n| if (std.mem.startsWith(u8, n, name)) {
+                if (amb.items.len > 0) amb.appendSlice(a, ", ") catch {};
+                amb.print(a, "--{s}", .{n}) catch {};
+            };
+            usageError(run_usage, who, "ambiguous option: --{s} could match {s}", .{ name, amb.items });
+        }
+        const k = hit orelse usageError(top_usage, prog, "unrecognized arguments: {s}", .{arg});
+        seen[k] = true;
+        if (!takes[k]) {
+            if (eq != null) usageError(run_usage, who, "argument --{s}: ignored explicit argument '{s}'", .{ names[k], arg[eq.? + 1 ..] });
+            continue;
+        }
+        var v: []const u8 = undefined;
+        if (eq) |e| {
+            v = arg[e + 1 ..];
+        } else {
+            if (i + 1 >= args.len or (args[i + 1].len > 0 and args[i + 1][0] == '-'))
+                usageError(run_usage, who, "argument --{s}: expected one argument", .{names[k]});
+            i += 1;
+            v = args[i];
+        }
+        if (std.mem.eql(u8, names[k], "module")) modules_list.append(a, v) catch {} else vals[k] = v;
+    }
+    if (vals[4]) |b| if (!engine_inList(&backends, b))
+        usageError(run_usage, who, "argument --backend: invalid choice: '{s}' (choose from 'auto', 'bwrap', 'userns', 'installpath')", .{b});
+    const grace_cli: ?f64 = if (vals[5]) |v| floatArg(run_usage, who, "grace-hours", v) else null;
+    const lock_timeout: ?f64 = if (vals[9]) |v| floatArg(run_usage, who, "lock-timeout", v) else null;
+
+    const software = nonEmpty(vals[0]) orelse nonEmpty(env.get("EASYBUILD_INSTALLPATH_SOFTWARE"));
+    const modules = nonEmpty(vals[1]) orelse nonEmpty(env.get("EASYBUILD_INSTALLPATH_MODULES"));
+    if (software == null or modules == null)
+        refuse("--software and --modules (or EASYBUILD_INSTALLPATH_SOFTWARE and EASYBUILD_INSTALLPATH_MODULES) are required", .{});
+    const state_root = nonEmpty(vals[2]) orelse nonEmpty(env.get("EB_STAGED_REBUILD_STATE_ROOT")) orelse
+        (std.fs.path.join(a, &.{ std.fs.path.dirname(admin.abspath(a, software.?)) orelse "/", ".eb-staged-rebuild" }) catch "");
+    const grace: f64 = grace_cli orelse blk: {
+        const e = env.get("EB_STAGED_REBUILD_GRACE_HOURS") orelse break :blk admin.default_grace_hours;
+        break :blk std.fmt.parseFloat(f64, std.mem.trim(u8, e, " \t\n\r\x0b\x0c")) catch refuse("EB_STAGED_REBUILD_GRACE_HOURS is not a number: '{s}'", .{e});
+    };
+    var eb_args = rest;
+    if (eb_args.len > 0 and std.mem.eql(u8, eb_args[0], "--")) eb_args = eb_args[1..];
+    const has_positional = for (eb_args) |x| {
+        if (x.len == 0 or x[0] != '-') break true;
+    } else false;
+    if (!has_positional) refuse("pass the easyconfig after --, for example: eb-staged-rebuild run --software S --modules M -- file.eb", .{});
+    if (vals[11]) |p| if (p.len == 0) refuse("--prepare must name a program; it is empty", .{});
+    return engine.run(a, env, .{
+        .software = software.?,
+        .modules = modules.?,
+        .state_root = state_root,
+        .eb_args = eb_args,
+        .backend = vals[4] orelse "auto",
+        .grace_hours = grace,
+        .dry_run = seen[6],
+        .module_rels = modules_list.items,
+        .eb_executable = vals[3] orelse (env.get("EB_STAGED_REBUILD_EB") orelse "eb"),
+        .run_id = vals[8],
+        .skip_live_check = seen[10],
+        .lock_timeout = lock_timeout,
+        .prepare_executable = vals[11],
+        .ledger_config = vals[12],
+    });
+}
+
+fn engine_inList(list: []const []const u8, s: []const u8) bool {
+    for (list) |x| if (std.mem.eql(u8, x, s)) return true;
+    return false;
+}
+
+fn nonEmpty(v: ?[]const u8) ?[]const u8 {
+    const x = v orelse return null;
+    return if (x.len > 0) x else null;
+}
+
 // ---- probe -------------------------------------------------------------
 
 fn cmdProbe(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
@@ -640,12 +757,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (std.mem.eql(u8, cmd, "retire")) return cmdRetire(a, rest, env);
     if (std.mem.eql(u8, cmd, "rollback")) return cmdRollback(a, rest, env);
     if (std.mem.eql(u8, cmd, "gc")) return cmdGc(a, rest, env);
+    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, rest, env);
     for (commands) |c| if (std.mem.eql(u8, c, cmd)) refuse("{s} is not in this build yet; use the Python eb-staged-rebuild", .{cmd});
     usageError(top_usage, prog, "argument command: invalid choice: '{s}' (choose from 'probe', 'run', 'resume', 'rollback', 'gc', 'retire', 'status', 'resolve')", .{cmd});
 }
 
 test {
     _ = admin;
+    _ = engine;
     _ = modulefile;
     _ = pyfmt;
     _ = probe;

@@ -103,7 +103,9 @@ compare "unknown command" bogus
 norm() {
     sed -E -e 's/[0-9]{8}T[0-9]{6}Z(-[0-9]+)?/STAMP/g' \
         -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z/ISO/g' \
-        -e 's/[0-9]{10}\.[0-9]+/TIME/g' -e "s#${work}/(py|zig)#W#g"
+        -e 's/[0-9]{10}\.[0-9]+/TIME/g' -e "s#${work}/(py|zig)#W#g" \
+        -e 's#[^ ]*python[0-9.]* -m eb_staged_rebuild\.userns_sandbox#SANDBOX#' \
+        -e "s#${TOOL_BIN} __userns-sandbox#SANDBOX#"
 }
 fixture() {
     local root=$1
@@ -153,6 +155,14 @@ compare_admin "gc removes past grace" gc --state-root @ROOT@/state --grace-hours
 compare_admin "gc again" gc --state-root @ROOT@/state --grace-hours 0
 compare_admin "rollback the retire" rollback --state-root @ROOT@/state @RETIRE@
 compare_admin "rollback again" rollback --state-root @ROOT@/state @RETIRE@
+compare_admin "run --dry-run, auto" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --dry-run --module demo/1 -- demo-1.eb
+compare_admin "run --dry-run, installpath" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --dry-run --module demo/1 -- demo-1.eb --robot --prefix /x
+compare_admin "run --dry-run, userns" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend userns --dry-run -- demo-1.eb -f
+compare_admin "run, no easyconfig" run --software @ROOT@/software --modules @ROOT@/modules --dry-run
+compare_admin "run, no software" run --dry-run -- x.eb
+compare_admin "run, bad backend" run --backend nope -- x.eb
+compare_admin "run, empty prepare" run --software @ROOT@/software --modules @ROOT@/modules --prepare= --dry-run -- x.eb
+compare_admin "run, relative prepare" run --software @ROOT@/software --modules @ROOT@/modules --prepare=rel --dry-run -- x.eb
 compare_admin "retire, no module file" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/none.lua
 compare_admin "retire, missing options" retire
 compare_admin "gc, bad grace" gc --state-root @ROOT@/state --grace-hours x

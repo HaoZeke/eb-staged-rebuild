@@ -2,7 +2,7 @@
 
 The Zig build in `zig/` is being ported command by command, in the order the
 port plan sets. In this build: `probe`, `status`, `resolve`, `retire`, `gc`,
-and `rollback` of a retire journal. Still to come: the ledger maintenance entry point; then `run`,
+and `rollback` of a retire journal; `run --dry-run`. Still to come: the ledger maintenance entry point; then `run`,
 `resume` and `rollback` of a run journal, which publishes through the ledger
 outbox as `run` does. A command not yet ported exits 2 with
 `eb-staged-rebuild: COMMAND is not in this build yet`. The Python tool stays
