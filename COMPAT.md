@@ -2,17 +2,18 @@
 
 The Zig build in `zig/` is being ported command by command, in the order the
 port plan sets. In this build: `probe`, `status`, `resolve`, `retire`, `gc`,
-and `rollback` of a retire journal; `run --dry-run`; the ledger maintenance entry point as `ledger-maintenance`. Still to come: `run`,
-`resume` and `rollback` of a run journal, which publishes through the ledger
-outbox as `run` does. A command not yet ported exits 2 with
-`eb-staged-rebuild: COMMAND is not in this build yet`. The Python tool stays
+`run`, `resume` and `rollback` for runs without `--ledger-config`; the ledger
+maintenance entry point as `ledger-maintenance`. Still to come: runs with
+`--ledger-config`, which publish through the ledger outbox. Such a run exits 2
+with `eb-staged-rebuild: ... is not in this build yet`. The Python tool stays
 the one to use until every command is ported and the test suite passes
 against the binary through `TOOL_BIN`.
 
 `tests/differential.sh` runs both on the same invocations and fails on any
-difference in exit code, stdout or stderr; for `retire`, `gc` and `rollback` it
-also compares the journals and the trees they leave, with run ids and
-timestamps normalized.
+difference in exit code, stdout or stderr; for the commands that change a fixture
+(`retire`, `gc`, `rollback`, `run`, `resume`) it also compares the journals and
+the trees they leave, with timestamps and the sandbox command normalized, and,
+for whole runs, the sha256 of module text that names each fixture's own path.
 
 ## Where the Zig build differs on purpose
 

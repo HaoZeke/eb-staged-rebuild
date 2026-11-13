@@ -8,6 +8,7 @@ const main_mod = @import("main.zig");
 const admin = @import("admin.zig");
 const probe = @import("probe.zig");
 const pyfmt = @import("pyfmt.zig");
+const run_mod = @import("run.zig");
 
 const sys = common.sys;
 const fsx = common.fsx;
@@ -141,7 +142,7 @@ fn symlinkComponent(a: Allocator, path: []const u8) ?[]const u8 {
     }
 }
 
-fn checkRoots(a: Allocator, spec: Spec) void {
+pub fn checkRoots(a: Allocator, spec: Spec) void {
     if (spec.prepare_executable) |p| {
         if (p.len == 0) refuse("publication preparation executable must not be empty", .{});
         if (p[0] != '/') refuse("publication preparation executable must be an absolute path", .{});
@@ -184,7 +185,13 @@ pub fn run(a: Allocator, env: probe.Env, spec_in: Spec) u8 {
             log("neither bubblewrap nor the user-namespace sandbox is usable; using the unsandboxed install-path fallback", .{});
     }
     if (spec.dry_run) return dryRun(a, env, spec, probes);
-    refuse("run without --dry-run is not in this build yet; use the Python eb-staged-rebuild", .{});
+    var ctx: admin.Ctx = .{ .a = a, .env = env, .pause = .{ .env = env } };
+    var r: run_mod.R = .{ .a = a, .env = env, .ctx = &ctx, .spec = spec };
+    const res = run_mod.run(&r, probes) catch |err| switch (err) {
+        error.OutOfMemory => refuse("out of memory", .{}),
+        else => refuse("{s}", .{r.why}),
+    };
+    return res.code;
 }
 
 fn dryRun(a: Allocator, env: probe.Env, spec: Spec, probes: Py) u8 {

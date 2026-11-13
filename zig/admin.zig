@@ -327,8 +327,17 @@ pub fn rollback(c: *Ctx, state_root: []const u8, run_id: []const u8, lock_timeou
     const st = fsx.statAt(fsx.cwd, path, false) catch refuse("no journal at {s}", .{path});
     if (!st.isReg()) refuse("no journal at {s}", .{path});
     var journal = main_mod.loadJournal(a, path);
-    if (!eqlStr(pyfmt.get(journal, "kind"), "retire"))
-        refuse("rollback of a run journal is not in this build yet; use the Python eb-staged-rebuild", .{});
+    if (!eqlStr(pyfmt.get(journal, "kind"), "retire")) {
+        const run_mod = @import("run.zig");
+        if (str(pyfmt.get(journal, "ledger_config"))) |lc| if (lc.len > 0)
+            refuse("rollback of a run with a ledger configuration is not in this build yet; use the Python eb-staged-rebuild", .{});
+        var r: run_mod.R = .{ .a = a, .env = c.env, .ctx = c, .spec = .{ .software = "", .modules = "", .state_root = state_root, .eb_args = &.{} }, .journal = journal, .path = path };
+        const res = run_mod.rollbackRun(&r) catch |err| switch (err) {
+            error.OutOfMemory => refuse("out of memory", .{}),
+            else => refuse("{s}", .{r.why}),
+        };
+        return res.code;
+    }
     if (eqlStr(pyfmt.get(journal, "state"), "rolled_back")) {
         log("run {s} is already rolled back", .{run_id});
         return 0;

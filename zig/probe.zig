@@ -611,44 +611,88 @@ fn mountRaw(source: ?[*:0]const u8, target: [*:0]const u8, flags: u32) linux.E {
 /// --probe is in this build.
 pub fn sandboxMain(a: Allocator, env: Env, args: []const []const u8) u8 {
     const prefix = "eb-staged-rebuild user namespace: ";
-    if (args.len == 0 or !std.mem.eql(u8, args[0], "--probe")) {
-        cli.err(prefix ++ "only --probe is in this build\n", .{});
-        return sandbox_setup_exit;
+    var read_only: std.ArrayList([]const u8) = .empty;
+    var probe_only = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--probe")) {
+            probe_only = true;
+        } else if (std.mem.eql(u8, args[i], "--read-only") and i + 1 < args.len) {
+            i += 1;
+            read_only.append(a, args[i]) catch {};
+        } else if (std.mem.startsWith(u8, args[i], "--read-only=")) {
+            read_only.append(a, args[i]["--read-only=".len..]) catch {};
+        } else break;
     }
-    var e = mountRaw(null, "/", MS_REC | MS_PRIVATE);
+    var command = args[i..];
+    if (command.len > 0 and std.mem.eql(u8, command[0], "--")) command = command[1..];
+    const e = mountRaw(null, "/", MS_REC | MS_PRIVATE);
     if (e != .SUCCESS) {
         cli.err(prefix ++ "mount /: {s}\n", .{strerror(e)});
         return sandbox_setup_exit;
     }
-    // tempfile.gettempdir(): TMPDIR, TEMP, TMP, then /tmp.
-    const tmp = blk: {
-        for ([_][]const u8{ "TMPDIR", "TEMP", "TMP" }) |k| if (env.get(k)) |v| if (v.len > 0 and isDir(v)) break :blk v;
-        break :blk "/tmp";
-    };
-    const root = mkdtemp(a, tmp, "tmp") catch |err| {
-        cli.err(prefix ++ "{t}\n", .{err});
-        return sandbox_setup_exit;
-    };
-    var zb: [sys.path_max:0]u8 = undefined;
-    const zr = sys.z(&zb, root) catch return sandbox_setup_exit;
-    e = mountRaw(zr.ptr, zr.ptr, MS_BIND | MS_REC);
-    if (e == .SUCCESS) e = mountRaw(zr.ptr, zr.ptr, MS_BIND | MS_REMOUNT | MS_RDONLY);
-    if (e != .SUCCESS) {
-        cli.err(prefix ++ "mount {s}: {s}\n", .{ root, strerror(e) });
-        return sandbox_setup_exit;
-    }
-    const probe_file = std.fs.path.join(a, &.{ root, "must-fail" }) catch return sandbox_setup_exit;
-    if (sys.openat(fsx.cwd, probe_file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o666)) |fd| {
-        sys.close(fd);
-        cli.err(prefix ++ "read-only bind mount remained writable\n", .{});
-        return sandbox_setup_exit;
-    } else |err| switch (err) {
-        error.ReadOnly => return 0,
-        else => {
+    if (probe_only) {
+        // tempfile.gettempdir(): TMPDIR, TEMP, TMP, then /tmp.
+        const tmp = blk: {
+            for ([_][]const u8{ "TMPDIR", "TEMP", "TMP" }) |k| if (env.get(k)) |v| if (v.len > 0 and isDir(v)) break :blk v;
+            break :blk "/tmp";
+        };
+        const root = mkdtemp(a, tmp, "tmp") catch |err| {
             cli.err(prefix ++ "{t}\n", .{err});
             return sandbox_setup_exit;
-        },
+        };
+        if (protect(a, root)) |msg| {
+            cli.err(prefix ++ "{s}\n", .{msg});
+            return sandbox_setup_exit;
+        }
+        const probe_file = std.fs.path.join(a, &.{ root, "must-fail" }) catch return sandbox_setup_exit;
+        if (sys.openat(fsx.cwd, probe_file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o666)) |fd| {
+            sys.close(fd);
+            cli.err(prefix ++ "read-only bind mount remained writable\n", .{});
+            return sandbox_setup_exit;
+        } else |err| switch (err) {
+            error.ReadOnly => return 0,
+            else => {
+                cli.err(prefix ++ "{t}\n", .{err});
+                return sandbox_setup_exit;
+            },
+        }
     }
+    for (read_only.items) |p| if (protect(a, p)) |msg| {
+        cli.err(prefix ++ "{s}\n", .{msg});
+        return sandbox_setup_exit;
+    };
+    if (command.len == 0) {
+        cli.err(prefix ++ "no sandbox command was supplied\n", .{});
+        return sandbox_setup_exit;
+    }
+    // os.execvpe(command[0], command, os.environ): a PATH search for a name.
+    const exe = if (std.mem.indexOfScalar(u8, command[0], '/') != null) command[0] else (which(a, env, command[0]) orelse {
+        cli.err(prefix ++ "[Errno 2] No such file or directory\n", .{});
+        return sandbox_setup_exit;
+    });
+    const zargv = a.allocSentinel(?[*:0]const u8, command.len, null) catch return sandbox_setup_exit;
+    for (command, 0..) |x, k| zargv[k] = (a.dupeSentinel(u8, x, 0) catch return sandbox_setup_exit).ptr;
+    const zexe = a.dupeSentinel(u8, exe, 0) catch return sandbox_setup_exit;
+    const rc = linux.execve(zexe.ptr, zargv.ptr, env.envp);
+    cli.err(prefix ++ "exec {s}: {s}\n", .{ command[0], strerror(linux.errno(rc)) });
+    return sandbox_setup_exit;
+}
+
+/// _protect: bind the directory onto itself, then remount it read-only.
+/// Null on success, else the reason.
+fn protect(a: Allocator, path_in: []const u8) ?[]const u8 {
+    var rb: [sys.path_max]u8 = undefined;
+    const cwd = fsx.realpath(fsx.cwd, ".", &rb) catch "/";
+    const path = if (path_in.len > 0 and path_in[0] == '/') path_in else (std.fs.path.join(a, &.{ cwd, path_in }) catch path_in);
+    const st = fsx.statAt(fsx.cwd, path, false) catch return std.fmt.allocPrint(a, "read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
+    if (!st.isDir()) return std.fmt.allocPrint(a, "read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
+    var zb: [sys.path_max:0]u8 = undefined;
+    const z = sys.z(&zb, path) catch return "path too long";
+    var e = mountRaw(z.ptr, z.ptr, MS_BIND | MS_REC);
+    if (e == .SUCCESS) e = mountRaw(z.ptr, z.ptr, MS_BIND | MS_REMOUNT | MS_RDONLY);
+    if (e != .SUCCESS) return std.fmt.allocPrint(a, "mount {s}: {s}", .{ path, strerror(e) }) catch "mount failed";
+    return null;
 }
 
 test "parseFrameworkVersion" {

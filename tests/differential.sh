@@ -105,7 +105,10 @@ norm() {
         -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z/ISO/g' \
         -e 's/[0-9]{10}\.[0-9]+/TIME/g' -e "s#${work}/(py|zig)#W#g" \
         -e 's#[^ ]*python[0-9.]* -m eb_staged_rebuild\.userns_sandbox#SANDBOX#' \
-        -e "s#${TOOL_BIN} __userns-sandbox#SANDBOX#"
+        -e "s#${TOOL_BIN} __userns-sandbox#SANDBOX#" |
+    if [ -n "${NORM_HASH:-}" ]; then sed -E 's/[0-9a-f]{64}/HASH/g'; else cat; fi |
+    # The sandbox command in a journal's eb_command list, one item per line.
+    perl -0pe 's/"[^"\n]*python[0-9.]*",\n\s*"-m",\n\s*"eb_staged_rebuild\.userns_sandbox",/"SANDBOX",/g; s/"\Q$ENV{TOOL_BIN}\E",\n\s*"__userns-sandbox",/"SANDBOX",/g' 
 }
 fixture() {
     local root=$1
@@ -117,6 +120,8 @@ fixture() {
     mkdir -p "${root}/software/old/.2.0001/sub" "${root}/software/old/2"
     touch "${root}/software/old/.2.0001/sub/file"
     printf '{"schema": 2, "run_id": "r1", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "old/2", "status": "published", "live_software": "%s/software/old/2", "retired": "%s/software/old/.2.0001", "published_at": 1000.5}]}\n' "${root}" "${root}" > "${root}/state/runs/r1/journal.json"
+    printf '#!/bin/sh\nexec python3 "%s/tests/fake_eb.py" "$@"\n' "${repo_root}" > "${root}/eb"
+    chmod +x "${root}/eb"
 }
 compare_admin() {
     local label=$1; shift
@@ -166,6 +171,18 @@ compare_admin "run, relative prepare" run --software @ROOT@/software --modules @
 compare_admin "retire, no module file" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/none.lua
 compare_admin "retire, missing options" retire
 compare_admin "gc, bad grace" gc --state-root @ROOT@/state --grace-hours x
+# A whole run with tests/fake_eb.py as eb. The module text names each
+# copy's own paths, so hashes are compared only through the files they name.
+export NORM_HASH=1
+compare_admin "run, installpath" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r2 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "status after the run" status --state-root @ROOT@/state r2
+compare_admin "resume a complete run" resume --state-root @ROOT@/state r2
+compare_admin "rollback the run" rollback --state-root @ROOT@/state r2
+compare_admin "rollback the run again" rollback --state-root @ROOT@/state r2
+compare_admin "resume a rolled-back run" resume --state-root @ROOT@/state r2
+compare_admin "run, userns" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend userns --eb @ROOT@/eb --run-id r4 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, eb fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb /bin/false --run-id r3 --skip-live-check --module demo/1 -- demo-1.eb
+unset NORM_HASH
 
 # The live-tree snapshot a journal records, compared as JSON.
 snap="${work}/snaptree"

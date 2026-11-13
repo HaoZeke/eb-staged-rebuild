@@ -694,6 +694,49 @@ fn nonEmpty(v: ?[]const u8) ?[]const u8 {
     return if (x.len > 0) x else null;
 }
 
+const resume_usage =
+    \\usage: eb-staged-rebuild resume [-h] --state-root STATE_ROOT
+    \\                                [--lock-timeout LOCK_TIMEOUT]
+    \\                                run_id
+    \\
+;
+const resume_help = resume_usage ++
+    \\
+    \\positional arguments:
+    \\  run_id
+    \\
+    \\options:
+    \\  -h, --help            show this help message and exit
+    \\  --state-root STATE_ROOT
+    \\  --lock-timeout LOCK_TIMEOUT
+    \\
+;
+
+fn cmdResume(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
+    var opts = [_]Opt{
+        .{ .name = "state-root", .takes_value = true },
+        .{ .name = "lock-timeout", .takes_value = true },
+    };
+    const who = prog ++ " resume";
+    var extra: std.ArrayList([]const u8) = .empty;
+    const pos = parseOpts(a, args, &opts, resume_help, resume_usage, who, &extra);
+    var need: std.ArrayList([]const u8) = .empty;
+    if (opts[0].value == null) need.append(a, "--state-root") catch {};
+    if (pos.len == 0) need.append(a, "run_id") catch {};
+    missing(a, resume_usage, who, need.items);
+    var all_extra = extra;
+    for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    unrecognized(a, all_extra.items);
+    const timeout: ?f64 = if (opts[1].value) |v| floatArg(resume_usage, who, "lock-timeout", v) else null;
+    var ctx = adminCtx(a, env);
+    const run_mod = @import("run.zig");
+    const res = run_mod.resumeRun(a, env, &ctx, opts[0].value.?, pos[0], timeout) catch |err| switch (err) {
+        error.OutOfMemory => refuse("out of memory", .{}),
+        else => refuse("{s}", .{last_why}),
+    };
+    return res.code;
+}
+
 // ---- probe -------------------------------------------------------------
 
 fn cmdProbe(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
@@ -767,14 +810,20 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (std.mem.eql(u8, cmd, "rollback")) return cmdRollback(a, rest, env);
     if (std.mem.eql(u8, cmd, "gc")) return cmdGc(a, rest, env);
     if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, rest, env);
+    if (std.mem.eql(u8, cmd, "resume")) return cmdResume(a, rest, env);
     for (commands) |c| if (std.mem.eql(u8, c, cmd)) refuse("{s} is not in this build yet; use the Python eb-staged-rebuild", .{cmd});
     usageError(top_usage, prog, "argument command: invalid choice: '{s}' (choose from 'probe', 'run', 'resume', 'rollback', 'gc', 'retire', 'status', 'resolve')", .{cmd});
 }
 
+/// The message of the last refusal the engine returned as an error.
+pub var last_why: []const u8 = "";
+
 test {
+    _ = @import("run.zig");
     _ = @import("swap.zig");
     _ = @import("livecheck.zig");
     _ = @import("discover.zig");
+    _ = @import("builders.zig");
     _ = admin;
     _ = engine;
     _ = ledger;
