@@ -8,7 +8,7 @@
 //! them while the run is paused at a fault point, and read them afterwards.
 //!
 //! EB_STAGED_REBUILD_ACL_MODEL   gpfs-native, gpfs-views, nfs4-generic, posix-access
-//! EB_STAGED_REBUILD_ACL_STORE   the store file: one "DEV:INO NAME HEX" line per attribute
+//! EB_STAGED_REBUILD_ACL_STORE   the store file: one "MAJOR:MINOR:INO NAME HEX" line per attribute
 //! EB_STAGED_REBUILD_ACL_FAULT   op=NAME[,under=DIR][,suffix=S][,path=P][,nth=N],errno=E
 //!                               one call fails with E: the Nth matching call, or every
 //!                               matching call when N is 0 or absent
@@ -153,7 +153,9 @@ fn save(s: Store) void {
 
 fn keyOf(fd: sys.fd_t) []const u8 {
     const st = fsx.fstat(fd) catch return "?";
-    return std.fmt.allocPrint(A(), "{d}:{d}", .{ st.dev, st.ino }) catch "?";
+    // MAJOR:MINOR:INO, as the test's Python side writes it; st_dev encodes
+    // the device differently in Python and in zig-common.
+    return std.fmt.allocPrint(A(), "{d}:{d}:{d}", .{ st.dev >> 32, st.dev & 0xffffffff, st.ino }) catch "?";
 }
 
 fn attrsOf(s: *Store, fd: sys.fd_t) *Attrs {

@@ -1,6 +1,6 @@
 """The store file of the test artifact's ACL models (zig/aclmodel.zig).
 
-One "DEV:INO NAME HEX" line per emulated attribute. A test sets attributes
+One "MAJOR:MINOR:INO NAME HEX" line per emulated attribute. A test sets attributes
 before a run, changes them while the run is paused, and reads them after it,
 through these helpers.
 """
@@ -21,7 +21,7 @@ MODELS = {
 
 def _key(path):
     info = os.stat(path)
-    return f"{info.st_dev}:{info.st_ino}"
+    return f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{info.st_ino}"
 
 
 def load(store):
