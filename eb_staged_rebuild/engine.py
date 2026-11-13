@@ -519,7 +519,9 @@ def _prepare_swap_source(mod, run_id, faults):
         raise NeedsIntervention(
             f"cannot prepare {mod['rel']}: staged={staged_kind}, retired={retired_kind}"
         )
-    if _tree_run_id(retired) != run_id:
+    # After an exchange the journal did not record, the run's tree is live and
+    # the retired name holds the old tree; the baseline step swaps them back.
+    if _tree_run_id(retired) != run_id and _tree_run_id(mod["live_software"]) != run_id:
         raise NeedsIntervention(f"prepared tree does not belong to run {run_id}: {retired}")
 
 

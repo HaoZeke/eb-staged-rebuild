@@ -91,6 +91,80 @@ class HardKillTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.message)
             self.assertEqual(open(builds, encoding="utf-8").read(), "1")
 
+    def test_sigkill_right_after_rename_exchange_resumes_to_published(self):
+        # The exchange happened and the journal does not say so: the live
+        # directory holds this run's tree and the retired name the old one.
+        with tempfile.TemporaryDirectory() as root:
+            software = os.path.join(root, "software")
+            modules = os.path.join(root, "modules")
+            state = os.path.join(root, "state")
+            os.makedirs(software)
+            os.makedirs(modules)
+            install, module, _text = classic_install(
+                software, modules, "demo/1", "v0\n", "all/demo/1.lua"
+            )
+            ready = os.path.join(root, "ready")
+            script = textwrap.dedent(
+                f"""
+                import copy
+                from eb_staged_rebuild.engine import Spec, run
+                from eb_staged_rebuild.faults import FaultInjector
+                from tests.support import PROBES, installpath_builder
+                probes = copy.deepcopy(PROBES)
+                probes["rename_exchange"] = {{"ok": True}}
+                run(Spec(
+                    software={software!r},
+                    modules={modules!r},
+                    state_root={state!r},
+                    eb_args=["demo-1.eb"],
+                    backend="installpath",
+                    module_rels=["demo/1"],
+                    builder=installpath_builder([
+                        {{"rel": "demo/1", "payload": "v1\\n", "module_rel": "all/demo/1.lua"}}
+                    ]),
+                    faults=FaultInjector(),
+                    run_id="run1",
+                    probes=probes,
+                ))
+                """
+            )
+            env = os.environ.copy()
+            env["EB_STAGED_REBUILD_PAUSE_AT"] = "swap:all/demo/1.lua.exchange.after"
+            env["EB_STAGED_REBUILD_PAUSE_READY"] = ready
+            env["EB_STAGED_REBUILD_PAUSE_SECONDS"] = "30"
+            child = subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                cwd=os.path.dirname(os.path.dirname(__file__)),
+            )
+            try:
+                deadline = time.monotonic() + 20
+                while not os.path.exists(ready) and time.monotonic() < deadline:
+                    self.assertIsNone(child.poll(), "publish exited before the exchange pause")
+                    time.sleep(0.05)
+                self.assertTrue(os.path.exists(ready), "pause was not reached")
+                os.kill(child.pid, signal.SIGKILL)
+                self.assertEqual(child.wait(timeout=10), -signal.SIGKILL)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "v1\n")
+            builder = installpath_builder(
+                [{"rel": "demo/1", "payload": "v1\n", "module_rel": "all/demo/1.lua"}]
+            )
+            result = resume(state, "run1", builder=builder)
+            self.assertEqual(result.returncode, 0, result.message)
+            self.assertEqual(result.state, "complete")
+            with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "v1\n")
+            with open(module, encoding="utf-8") as handle:
+                self.assertIn(install, handle.read())
+            self.assertEqual(rollback(state, "run1").returncode, 0)
+            with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "v0\n")
+
     def test_sigkill_during_rollback_fallback_is_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
             software = os.path.join(root, "software")
