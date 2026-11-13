@@ -1238,15 +1238,24 @@ def rollback(state_root, run_id, faults=None, clock=None, lock_timeout=None):
                 return Result(outbox.PENDING_EXIT, run_id, journal["state"], message, _command_text(journal))
         try:
             for mod in reversed(journal.get("modules_plan") or []):
-                result = swap_directories(
-                    mod["live_software"],
-                    mod["retired"],
-                    allow_exchange=_allow_exchange(journal),
-                    faults=faults,
-                    step_prefix=f"rollback.swap:{mod['rel']}",
-                )
+                recover_interrupted_swap(mod["live_software"], mod["retired"])
+                # An exchange the journal did not record already put the old
+                # tree back: this run's tree is at the retired name.
+                if (
+                    _tree_run_id(mod["live_software"]) != journal["run_id"]
+                    and _tree_run_id(mod["retired"]) == journal["run_id"]
+                ):
+                    method = mod.get("rollback_method") or "recovered"
+                else:
+                    method = swap_directories(
+                        mod["live_software"],
+                        mod["retired"],
+                        allow_exchange=_allow_exchange(journal),
+                        faults=faults,
+                        step_prefix=f"rollback.swap:{mod['rel']}",
+                    ).method
                 mod["status"] = "restoring"
-                mod["rollback_method"] = result.method
+                mod["rollback_method"] = method
                 save_journal(path, journal, faults, f"journal.rollback-swap:{mod['rel']}")
             for mod in reversed(journal.get("modules_plan") or []):
                 _restore_old_module(mod, faults)
