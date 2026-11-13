@@ -820,7 +820,7 @@ fn validatePublicationSet(r: *R) E!void {
         const bytes = fsx.readAll(r.a, f.fd, 1 << 30) catch |err| return r.refuse("cannot validate publication for {s}: {s}", .{ rel, main_mod.osError(r.a, err, prepared) });
         if (!std.mem.eql(u8, sha(r.a, bytes), s(pyfmt.get(m, "new_hash")))) return r.intervene("prepared module bytes for {s} changed", .{rel});
         var why: atomic.Why = .{};
-        _ = atomic.readMetadata(r.a, prepared, &why) catch |err| return r.refuse("cannot validate publication for {s}: {s}", .{ rel, if (err == error.Refused) why.msg else @errorName(err) });
+        _ = atomic.readMetadata(r.a, prepared, &why) catch |err| return r.refuse("cannot validate publication for {s}: {s}", .{ rel, if (err == error.Refused) why.msg else main_mod.osError(r.a, err, prepared) });
     }
 }
 

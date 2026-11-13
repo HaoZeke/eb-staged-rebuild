@@ -60,6 +60,10 @@ def _write_tree(software, modules, root_in_module):
     _write(os.path.join(generation, "easybuild", "demo-1.eb"), "name = 'demo'\n")
     module = os.path.join(modules, "all", rel + ".lua")
     _write(module, _lua(root_in_module))
+    # FAKE_EB_ACL: hex bytes of a POSIX access ACL set on the written module.
+    acl = os.environ.get("FAKE_EB_ACL")
+    if acl:
+        os.setxattr(module, "system.posix_acl_access", bytes.fromhex(acl))
     link = os.path.join(modules, "tools", rel + ".lua")
     os.makedirs(os.path.dirname(link), exist_ok=True)
     if not os.path.lexists(link):
