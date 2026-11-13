@@ -774,6 +774,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const all = init.args.toSlice(a) catch return 2;
     const args: []const []const u8 = if (all.len > 1) @ptrCast(all[1..]) else &.{};
     const env: probe.Env = .{ .envp = init.environ.block.slice.ptr };
+    // Only the -Dtest-ops test artifact can emulate a file system's ACLs.
+    if (comptime common.atomic.replaceable) @import("aclmodel.zig").installFromEnv(env);
 
     // Internal: the live-tree snapshot as JSON, for the differential tests.
     if (args.len == 2 and std.mem.eql(u8, args[0], "__snapshot")) {
