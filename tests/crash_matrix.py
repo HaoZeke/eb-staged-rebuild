@@ -7,6 +7,15 @@ resumed. Both must leave the same live tree, the same module file and the
 same journal state; a run must end either with the old tree untouched or
 fully published. The same is done for rollback of a complete run.
 
+Four fixtures: one module; two modules (lib/1 and app/1); one module with
+a --prepare policy that counts its invocations, which must run once,
+or twice when the kill falls after it exited and before the journal
+recorded it; and one module forced onto the
+ordinary-rename fallback. Run and rollback take the swap method from the
+journal's recorded rename_exchange probe, so the fallback fixture stops a
+run at build.start, records the probe as failed, and kills the resumed
+run or a later rollback at each fallback rename.
+
     TOOL_BIN=zig-out/bin/eb-staged-rebuild python3 tests/crash_matrix.py
 """
 
@@ -23,47 +32,103 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAKE_EB = os.path.join(REPO, "tests", "fake_eb.py")
 sys.path.insert(0, REPO)
 
-from eb_staged_rebuild.engine import Spec, run  # noqa: E402
+from eb_staged_rebuild.engine import Spec, rollback, run  # noqa: E402
 from eb_staged_rebuild.faults import FaultInjector  # noqa: E402
 
-
-def fixture(root):
-    os.makedirs(os.path.join(root, "modules", "all", "demo"))
-    os.makedirs(os.path.join(root, "software", "demo", "1", "easybuild"))
-    os.makedirs(os.path.join(root, "state"))
-    with open(os.path.join(root, "software", "demo", "1", "easybuild", "demo-1.eb"), "w") as handle:
-        handle.write("name = 'demo'\n")
-    with open(os.path.join(root, "software", "demo", "1", "PAYLOAD"), "w") as handle:
-        handle.write("old\n")
-    with open(os.path.join(root, "modules", "all", "demo", "1.lua"), "w") as handle:
-        handle.write(f'local root = "{root}/software/demo/1"\nsetenv("EBROOTDEMO", root)\n')
-    eb = os.path.join(root, "eb")
-    with open(eb, "w") as handle:
-        handle.write(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_EB}" "$@"\n')
-    os.chmod(eb, 0o755)
+FALLBACK = ("live-to-hold", "staged-to-live", "hold-to-staged")
 
 
-def run_args(root, run_id):
-    return [
-        "run", "--software", f"{root}/software", "--modules", f"{root}/modules",
-        "--state-root", f"{root}/state", "--backend", "installpath", "--eb", f"{root}/eb",
-        "--run-id", run_id, "--module", "demo/1", "--", "demo-1.eb",
-    ]
+class Fixture:
+    def __init__(self, name, rels, prepare=False):
+        self.name = name
+        self.rels = rels
+        self.prepare = prepare
+
+    def build(self, root):
+        for rel in self.rels:
+            name, version = rel.split("/")
+            os.makedirs(os.path.join(root, "modules", "all", name))
+            os.makedirs(os.path.join(root, "software", name, version, "easybuild"))
+            with open(os.path.join(root, "software", name, version, "easybuild", f"{name}-{version}.eb"), "w") as handle:
+                handle.write(f"name = '{name}'\n")
+            with open(os.path.join(root, "software", name, version, "PAYLOAD"), "w") as handle:
+                handle.write("old\n")
+            with open(os.path.join(root, "modules", "all", name, f"{version}.lua"), "w") as handle:
+                handle.write(f'local root = "{root}/software/{rel}"\nsetenv("EBROOT{name.upper()}", root)\n')
+        os.makedirs(os.path.join(root, "state"))
+        eb = os.path.join(root, "eb")
+        with open(eb, "w") as handle:
+            handle.write(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_EB}" "$@"\n')
+        os.chmod(eb, 0o755)
+        if self.prepare:
+            policy = os.path.join(root, "prepare")
+            with open(policy, "w") as handle:
+                handle.write(f'#!/bin/sh\necho x >> "{root}/prepare-count"\n')
+            os.chmod(policy, 0o755)
+
+    def env(self):
+        return {"FAKE_EB_RELS": ",".join(self.rels)}
+
+    def run_args(self, root, run_id):
+        args = [
+            "run", "--software", f"{root}/software", "--modules", f"{root}/modules",
+            "--state-root", f"{root}/state", "--backend", "installpath", "--eb", f"{root}/eb",
+            "--run-id", run_id,
+        ]
+        if self.prepare:
+            args += ["--prepare", f"{root}/prepare"]
+        for rel in self.rels:
+            args += ["--module", rel]
+        return args + ["--", "demo-1.eb"]
+
+    def spec(self, root, faults=None):
+        return Spec(
+            software=f"{root}/software", modules=f"{root}/modules", state_root=f"{root}/state",
+            eb_args=["demo-1.eb"], backend="installpath", eb_executable=f"{root}/eb",
+            module_rels=list(self.rels), run_id="r1", faults=faults,
+            prepare_executable=f"{root}/prepare" if self.prepare else None,
+        )
 
 
-def steps_reached():
+ONE = Fixture("one module", ["demo/1"])
+TWO = Fixture("two modules", ["lib/1", "app/1"])
+PREPARE = Fixture("prepare", ["demo/1"], prepare=True)
+
+
+def with_env(extra, fn):
+    saved = {key: os.environ.get(key) for key in extra}
+    os.environ.update(extra)
+    try:
+        return fn()
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def steps_reached(fixture):
     """Every fault step one Python run reaches, in order."""
     root = tempfile.mkdtemp(prefix="crash-steps-")
     try:
-        fixture(root)
+        fixture.build(root)
         faults = FaultInjector()
-        spec = Spec(
-            software=f"{root}/software", modules=f"{root}/modules", state_root=f"{root}/state",
-            eb_args=["demo-1.eb"], backend="installpath", eb_executable=f"{root}/eb",
-            module_rels=["demo/1"], run_id="r1", faults=faults,
-        )
-        result = run(spec)
+        result = with_env(fixture.env(), lambda: run(fixture.spec(root, faults)))
         assert result.returncode == 0, result
+        return list(dict.fromkeys(faults.reached))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def steps_rollback(fixture):
+    """Every fault step one Python rollback reaches."""
+    root = tempfile.mkdtemp(prefix="crash-rbsteps-")
+    try:
+        fixture.build(root)
+        assert with_env(fixture.env(), lambda: run(fixture.spec(root))).returncode == 0
+        faults = FaultInjector()
+        assert rollback(f"{root}/state", "r1", faults=faults).returncode == 0
         return list(dict.fromkeys(faults.reached))
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -75,9 +140,10 @@ def command(impl):
     return [os.environ["TOOL_BIN"]]
 
 
-def env_for(step, ready):
+def env_for(fixture, step, ready):
     env = dict(os.environ)
     env["PYTHONPATH"] = REPO
+    env.update(fixture.env())
     if step:
         env["EB_STAGED_REBUILD_PAUSE_AT"] = step
         env["EB_STAGED_REBUILD_PAUSE_READY"] = ready
@@ -85,11 +151,11 @@ def env_for(step, ready):
     return env
 
 
-def kill_at(impl, args, step, root):
+def kill_at(impl, fixture, args, step, root):
     """Start the command, wait until it pauses at `step`, then SIGKILL it."""
     ready = os.path.join(root, "ready")
     proc = subprocess.Popen(
-        command(impl) + args, env=env_for(step, ready), cwd=root,
+        command(impl) + args, env=env_for(fixture, step, ready), cwd=root,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     deadline = time.monotonic() + 60
@@ -107,104 +173,182 @@ def kill_at(impl, args, step, root):
     return "killed"
 
 
-def outcome(impl, root, run_id):
-    resumed = subprocess.run(
-        command(impl) + ["resume", "--state-root", f"{root}/state", run_id],
-        env=env_for(None, ""), cwd=root, capture_output=True, text=True,
-    )
-    with open(os.path.join(root, "software", "demo", "1", "PAYLOAD")) as handle:
-        payload = handle.read()
-    with open(os.path.join(root, "modules", "all", "demo", "1.lua")) as handle:
-        module = handle.read().replace(root, "W")
-    journal_path = os.path.join(root, "state", "runs", run_id, "journal.json")
-    state = None
-    if os.path.exists(journal_path):
-        with open(journal_path) as handle:
+def finish(impl, fixture, args, root):
+    return subprocess.run(
+        command(impl) + args, env=env_for(fixture, None, ""), cwd=root, capture_output=True, text=True,
+    ).returncode
+
+
+def journal_file(root, run_id):
+    return os.path.join(root, "state", "runs", run_id, "journal.json")
+
+
+def without_exchange(root, run_id):
+    """Record the rename_exchange probe as failed, so the swap uses the fallback."""
+    path = journal_file(root, run_id)
+    with open(path) as handle:
+        journal = json.load(handle)
+    journal["probes"]["rename_exchange"]["ok"] = False
+    with open(path, "w") as handle:
+        json.dump(journal, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def outcome(fixture, root, run_id):
+    payloads = []
+    modules = []
+    for rel in fixture.rels:
+        name, version = rel.split("/")
+        with open(os.path.join(root, "software", name, version, "PAYLOAD")) as handle:
+            payloads.append(handle.read())
+        with open(os.path.join(root, "modules", "all", name, f"{version}.lua")) as handle:
+            modules.append(handle.read().replace(root, "W"))
+    state = methods = None
+    if os.path.exists(journal_file(root, run_id)):
+        with open(journal_file(root, run_id)) as handle:
             journal = json.load(handle)
-        state = (journal["state"], [mod.get("status") for mod in journal.get("modules_plan") or []])
-    hidden = sorted(name for name in os.listdir(os.path.join(root, "software", "demo")) if name.startswith("."))
-    return {"resume_rc": resumed.returncode, "payload": payload, "module": module, "state": state, "hidden": hidden}
+        plan = journal.get("modules_plan") or []
+        state = (journal["state"], [mod.get("status") for mod in plan])
+        methods = [mod.get("swap_method") for mod in plan]
+    hidden = sorted(
+        name
+        for rel in fixture.rels
+        for name in os.listdir(os.path.join(root, "software", rel.split("/")[0]))
+        if name.startswith(".")
+    )
+    info = {"payloads": payloads, "modules": modules, "state": state, "methods": methods, "hidden": hidden}
+    count = os.path.join(root, "prepare-count")
+    if fixture.prepare:
+        info["prepare_runs"] = open(count).read().count("x") if os.path.exists(count) else 0
+    return info
 
 
-def compare(label, results):
+def compare(label, fixture, results, kind, must_pause=False, method=None, prepare_runs=1):
     if results["py"] != results["zig"]:
         print(f"DIFF {label}")
         for impl in ("py", "zig"):
             print(f"     {impl}: {results[impl]}")
         return 1
     final = results["py"]
-    if label.startswith("run"):
+    published = ("complete", ["published"] * len(fixture.rels))
+    if kind == "run":
         # Published in full, or untouched when no journal was written.
-        ok = (final["state"] == ("complete", ["published"]) and final["payload"] == "from-eb\n") or (
-            final["state"] is None and final["payload"] == "old\n"
+        ok = (final["state"] == published and set(final["payloads"]) == {"from-eb\n"}) or (
+            final["state"] is None and set(final["payloads"]) == {"old\n"}
         )
+        # The policy runs once, or twice when the kill fell after it exited
+        # and before the journal recorded it as complete.
+        if ok and fixture.prepare and final["state"] == published:
+            ok = final["prepare_runs"] == prepare_runs
     else:
-        ok = final["state"] == ("rolled_back", ["restored"]) and final["payload"] == "old\n"
+        ok = final["state"] == ("rolled_back", ["restored"] * len(fixture.rels)) and set(final["payloads"]) == {"old\n"}
+    if ok and must_pause:
+        ok = final["kill"] == "killed"
+    if ok and method:
+        ok = final["methods"] == [method] * len(fixture.rels)
     if not ok:
-        print(f"BAD  {label}: {final['state']} payload {final['payload'].strip()}")
+        print(f"BAD  {label}: {final}")
         return 1
-    print(f"same {label}: {final['state']} payload {final['payload'].strip()}")
+    print(f"same {label}: {final['state']} payloads {[p.strip() for p in final['payloads']]}")
     return 0
+
+
+def each_impl(prefix, body):
+    results = {}
+    for impl in ("py", "zig"):
+        root = tempfile.mkdtemp(prefix=f"{prefix}-{impl}-")
+        try:
+            results[impl] = body(impl, root)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    return results
+
+
+def run_matrix(fixture):
+    failures = 0
+    steps = steps_reached(fixture)
+    # The policy's success is durable once journal.prepared is renamed into
+    # place; a kill after prepare.invoke and up to that rename reruns it.
+    rerun = set()
+    if fixture.prepare:
+        start = steps.index("prepare.invoke") + 1
+        rerun = set(steps[start:steps.index("journal.prepared.rename", start) + 1])
+    for step in steps:
+        def body(impl, root):
+            fixture.build(root)
+            how = kill_at(impl, fixture, fixture.run_args(root, "r1"), step, root)
+            rc = finish(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], root)
+            return {"kill": how, "resume_rc": rc, **outcome(fixture, root, "r1")}
+        failures += compare(
+            f"{fixture.name}: run killed at {step}", fixture, each_impl("crash", body), "run",
+            prepare_runs=2 if step in rerun else 1,
+        )
+    rollback_steps = steps_rollback(fixture)
+    for step in rollback_steps:
+        def body(impl, root):
+            fixture.build(root)
+            assert finish(impl, fixture, fixture.run_args(root, "r1"), root) == 0
+            how = kill_at(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], step, root)
+            rc = finish(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], root)
+            return {"kill": how, "rollback_rc": rc, **outcome(fixture, root, "r1")}
+        failures += compare(f"{fixture.name}: rollback killed at {step}", fixture, each_impl("crash-rb", body), "rollback")
+    return failures, len(steps) + len(rollback_steps)
+
+
+def fallback_matrix():
+    """The ordinary-rename fallback, killed after each of its renames."""
+    fixture = ONE
+    failures = total = 0
+
+    def published_by_fallback(impl, root):
+        fixture.build(root)
+        assert kill_at(impl, fixture, fixture.run_args(root, "r1"), "build.start", root) == "killed"
+        without_exchange(root, "r1")
+
+    def complete(impl, root):
+        published_by_fallback(impl, root)
+        rc = finish(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], root)
+        return {"kill": "killed", "resume_rc": rc, **outcome(fixture, root, "r1")}
+
+    failures += compare("fallback: run published", fixture, each_impl("crash-fb", complete), "run", method="rename-fallback")
+    total += 1
+    for rel in fixture.rels:
+        for name in FALLBACK:
+            step = f"swap:all/{rel}.lua.fallback.{name}"
+
+            def body(impl, root):
+                published_by_fallback(impl, root)
+                how = kill_at(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], step, root)
+                rc = finish(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], root)
+                return {"kill": how, "resume_rc": rc, **outcome(fixture, root, "r1")}
+            failures += compare(f"fallback: run killed at {step}", fixture, each_impl("crash-fb", body), "run", must_pause=True, method="rename-fallback")
+            total += 1
+
+            rb_step = f"rollback.{step}"
+
+            def rb_body(impl, root):
+                published_by_fallback(impl, root)
+                assert finish(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], root) == 0
+                how = kill_at(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], rb_step, root)
+                rc = finish(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], root)
+                return {"kill": how, "rollback_rc": rc, **outcome(fixture, root, "r1")}
+            failures += compare(f"fallback: rollback killed at {rb_step}", fixture, each_impl("crash-fb", rb_body), "rollback", must_pause=True)
+            total += 1
+    return failures, total
 
 
 def main():
     if not os.environ.get("TOOL_BIN"):
         print("set TOOL_BIN", file=sys.stderr)
         return 2
-    failures = 0
-    steps = steps_reached()
-    for step in steps:
-        results = {}
-        for impl in ("py", "zig"):
-            root = tempfile.mkdtemp(prefix=f"crash-{impl}-")
-            try:
-                fixture(root)
-                how = kill_at(impl, run_args(root, "r1"), step, root)
-                results[impl] = {"kill": how, **outcome(impl, root, "r1")}
-            finally:
-                shutil.rmtree(root, ignore_errors=True)
-        failures += compare(f"run killed at {step}", results)
-    # Rollback of a complete run, killed at each step it reaches.
-    rollback_steps = [s for s in steps_rollback()]
-    for step in rollback_steps:
-        results = {}
-        for impl in ("py", "zig"):
-            root = tempfile.mkdtemp(prefix=f"crash-rb-{impl}-")
-            try:
-                fixture(root)
-                done = subprocess.run(command(impl) + run_args(root, "r1"), env=env_for(None, ""), cwd=root, capture_output=True)
-                assert done.returncode == 0, done.stderr
-                how = kill_at(impl, ["rollback", "--state-root", f"{root}/state", "r1"], step, root)
-                again = subprocess.run(command(impl) + ["rollback", "--state-root", f"{root}/state", "r1"], env=env_for(None, ""), cwd=root, capture_output=True, text=True)
-                info = outcome(impl, root, "r1")
-                info.pop("resume_rc")
-                results[impl] = {"kill": how, "rollback_rc": again.returncode, **info}
-            finally:
-                shutil.rmtree(root, ignore_errors=True)
-        failures += compare(f"rollback killed at {step}", results)
-    total = len(steps) + len(rollback_steps)
+    failures = total = 0
+    for fixture in (ONE, TWO, PREPARE):
+        f, t = run_matrix(fixture)
+        failures, total = failures + f, total + t
+    f, t = fallback_matrix()
+    failures, total = failures + f, total + t
     print(f"{total - failures} of {total} cases match")
     return 1 if failures else 0
-
-
-def steps_rollback():
-    """Every fault step one Python rollback reaches."""
-    from eb_staged_rebuild.engine import rollback
-
-    root = tempfile.mkdtemp(prefix="crash-rbsteps-")
-    try:
-        fixture(root)
-        spec = Spec(
-            software=f"{root}/software", modules=f"{root}/modules", state_root=f"{root}/state",
-            eb_args=["demo-1.eb"], backend="installpath", eb_executable=f"{root}/eb",
-            module_rels=["demo/1"], run_id="r1",
-        )
-        assert run(spec).returncode == 0
-        faults = FaultInjector()
-        assert rollback(f"{root}/state", "r1", faults=faults).returncode == 0
-        return list(dict.fromkeys(faults.reached))
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

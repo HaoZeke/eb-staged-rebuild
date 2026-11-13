@@ -53,8 +53,8 @@ def _lua(root):
     )
 
 
-def _write_tree(software, modules, root_in_module):
-    rel = _rel()
+def _write_tree(software, modules, root_in_module, rel=None):
+    rel = rel or _rel()
     generation = os.path.join(software, rel)
     _write(os.path.join(generation, "PAYLOAD"), _payload())
     _write(os.path.join(generation, "easybuild", "demo-1.eb"), "name = 'demo'\n")
@@ -73,9 +73,9 @@ def _write_tree(software, modules, root_in_module):
 def main(argv):
     _record(argv)
     if "--dry-run" in argv:
-        rel = _rel()
         print("Dry run: printing build status of easyconfigs")
-        print(f" * [R] demo-1.eb (module: {rel})")
+        for rel in (os.environ.get("FAKE_EB_RELS") or _rel()).split(","):
+            print(f" * [R] {rel.replace('/', '-')}.eb (module: {rel})")
         return 0
     if os.environ.get("FAKE_EB_FAIL") == "1":
         print("fake eb forced failure", file=sys.stderr)
@@ -117,8 +117,9 @@ def main(argv):
     if not software or not modules:
         print("missing installpath", file=sys.stderr)
         return 2
-    rel = _rel()
-    _write_tree(software, modules, os.path.join(software, rel))
+    # FAKE_EB_RELS: a comma-separated list of modules to write instead of one.
+    for rel in (os.environ.get("FAKE_EB_RELS") or _rel()).split(","):
+        _write_tree(software, modules, os.path.join(software, rel), rel)
     return 0
 
 
