@@ -80,13 +80,13 @@ echo "=== retire dry-run ==="
 eb-staged-rebuild retire \
   --state-root "$STATE" \
   --module-file "$MODULES/all/demo/1.lua" \
-  --reason "published on software.surf.nl" \
+  --reason "published on a CernVM-FS repository" \
   --dry-run
 echo "=== retire ==="
 eb-staged-rebuild retire \
   --state-root "$STATE" \
   --module-file "$MODULES/all/demo/1.lua" \
-  --reason "published on software.surf.nl"
+  --reason "published on a CernVM-FS repository"
 echo "=== status after retire ==="
 eb-staged-rebuild status --state-root "$STATE"
 echo "=== rollback retire ==="

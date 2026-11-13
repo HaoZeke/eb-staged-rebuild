@@ -10,7 +10,7 @@ The state root and the module file's directory must be the same device. A differ
 eb-staged-rebuild retire \
   --state-root /tmp/ebsr-docs-prefix/.eb-staged-rebuild \
   --module-file /tmp/ebsr-docs-prefix/modules/all/demo/1.lua \
-  --reason "published on software.surf.nl" \
+  --reason "published on a CernVM-FS repository" \
   --dry-run
 ```
 
@@ -24,7 +24,7 @@ eb-staged-rebuild: would retire /tmp/ebsr-docs-prefix/modules/all/demo/1.lua (so
 eb-staged-rebuild retire \
   --state-root /tmp/ebsr-docs-prefix/.eb-staged-rebuild \
   --module-file /tmp/ebsr-docs-prefix/modules/all/demo/1.lua \
-  --reason "published on software.surf.nl"
+  --reason "published on a CernVM-FS repository"
 ```
 
 ```text
