@@ -125,6 +125,14 @@ fixture() {
     printf '#!/bin/sh\nexec python3 "%s/tests/fake_eb_stack.py" "$@"\n' "${repo_root}" > "${root}/ebstack"
     chmod +x "${root}/ebstack"
     printf '{"eb_stack": "%s/ebstack", "log": "%s/ledger.jsonl", "key": "%s/key.pem", "head": "%s/head.json", "actor": "ci", "stack": "s", "target": "t"}\n' "${root}" "${root}" "${root}" "${root}" > "${root}/ledger.json"
+    mkdir -p "${root}/bev/log" "${root}/bev/keys"
+    printf 'fake key\n' > "${root}/bev/keys/key.pem"
+    printf 'name = "demo"\n' > "${root}/bev/demo-1.eb"
+    printf '{"eb_stack": "%s/ebstack", "log": "%s/bev/log/ledger.jsonl", "key": "%s/bev/keys/key.pem", "outbox": "%s/bev/outbox"}\n' "${root}" "${root}" "${root}" "${root}" > "${root}/bev/config.json"
+    for op in ok again fails missing pend; do
+        printf '{"operation": "%s", "actor": "ci", "stack": "s", "module": "demo/1", "location": "%s/software/demo/1", "target": {"cpu": "x86_64/generic"}, "easyconfig": {"path": "%s/bev/demo-1.eb"}}\n' "${op}" "${root}" "${root}" > "${root}/bev/${op}.json"
+    done
+    printf '{"operation": "bad op", "actor": "ci"}\n' > "${root}/bev/bad.json"
 }
 compare_admin() {
     local label=$1; shift
@@ -135,8 +143,13 @@ compare_admin() {
         local -a cmd args=()
         local rid
         if [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild); else cmd=("${TOOL_BIN}"); fi
+        # The build-events entry point is its own module in the Python tool.
+        local bev=0
+        for a in "$@"; do [ "${a}" = build-events ] && bev=1; done
+        if [ "${bev}" = 1 ] && [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild.build_events); fi
         rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | head -1)
         for a in "$@"; do
+            if [ "${a}" = build-events ] && [ "${impl}" = py ]; then continue; fi
             a="${a//@ROOT@/${root}}"
             if [ "${a}" = "@CMD@" ]; then args+=("${cmd[@]}"); else args+=("${a//@RETIRE@/${rid}}"); fi
         done
@@ -199,6 +212,16 @@ for impl in py zig; do echo fail-before > "${work}/${impl}/plan"; done
 export FAKE_LEDGER_PLAN_NAME=plan
 compare_admin "run, ledger append fails" env FAKE_LEDGER_PLAN=@ROOT@/plan @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r6 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
 compare_admin "resume delivers the record" resume --state-root @ROOT@/state r6
+compare_admin "build-events, command succeeds" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json -- true
+compare_admin "build-events, recorded, not repeated" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json -- false
+compare_admin "build-events, deliver a recorded one" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json --deliver
+compare_admin "build-events, command fails" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/fails.json -- sh -c "exit 3"
+compare_admin "build-events, command missing" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/missing.json -- no-such-command-here
+for impl in py zig; do echo fail-before > "${work}/${impl}/plan2"; done
+compare_admin "build-events, append fails" env FAKE_LEDGER_PLAN=@ROOT@/plan2 @CMD@ build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/pend.json -- true
+compare_admin "build-events, deliver then run" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/pend.json -- true
+compare_admin "build-events, bad metadata" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/bad.json -- true
+compare_admin "build-events, both deliver and command" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json --deliver -- true
 compare_admin "run, eb fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb /bin/false --run-id r3 --skip-live-check --module demo/1 -- demo-1.eb
 unset NORM_HASH
 

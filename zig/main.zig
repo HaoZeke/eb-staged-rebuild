@@ -811,6 +811,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (std.mem.eql(u8, cmd, "gc")) return cmdGc(a, rest, env);
     if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, rest, env);
     if (std.mem.eql(u8, cmd, "resume")) return cmdResume(a, rest, env);
+    if (std.mem.eql(u8, cmd, "build-events")) return @import("build_events.zig").main(a, rest, env);
     for (commands) |c| if (std.mem.eql(u8, c, cmd)) refuse("{s} is not in this build yet; use the Python eb-staged-rebuild", .{cmd});
     usageError(top_usage, prog, "argument command: invalid choice: '{s}' (choose from 'probe', 'run', 'resume', 'rollback', 'gc', 'retire', 'status', 'resolve')", .{cmd});
 }
@@ -821,6 +822,7 @@ pub var last_why: []const u8 = "";
 test {
     _ = @import("run.zig");
     _ = @import("publish.zig");
+    _ = @import("build_events.zig");
     _ = @import("swap.zig");
     _ = @import("livecheck.zig");
     _ = @import("discover.zig");
