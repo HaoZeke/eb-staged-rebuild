@@ -133,7 +133,7 @@ pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp:
         if (w > 3) _ = linux.close_range(3, w - 1, .{ .UNSHARE = false, .CLOEXEC = false });
         _ = linux.close_range(w + 1, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
         const exec_rc = linux.execve(zexe.ptr, zargv.ptr, envp);
-        const code: u32 = @intFromEnum(linux.errno(exec_rc));
+        const code: u32 = @backingInt(linux.errno(exec_rc));
         _ = linux.write(report[1], std.mem.asBytes(&code), @sizeOf(u32));
         linux.exit_group(127);
     }
@@ -148,7 +148,7 @@ pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp:
     if (linux.errno(got) == .SUCCESS and got == @sizeOf(u32)) {
         var status: i32 = 0;
         while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
-        exec_errno = @enumFromInt(code);
+        exec_errno = @fromBackingInt(@intCast(code));
         return error.ExecFailed;
     }
     while (interrupted.load(.seq_cst) == 0) {
