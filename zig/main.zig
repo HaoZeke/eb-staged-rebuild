@@ -1,8 +1,8 @@
 //! eb-staged-rebuild: build EasyBuild software in a staged tree, then
 //! exchange the complete tree with the stable live directory.
 //!
-//! This build carries the read-only commands (probe, status, resolve); the
-//! commands that change installations follow in the order the port plan
+//! This build carries probe, status, resolve, retire, gc, and rollback of a
+//! retire journal; run, resume and rollback of a run journal follow in the order the port plan
 //! sets, and until then report that they are not in this build.
 const std = @import("std");
 const linux = std.os.linux;
@@ -10,6 +10,7 @@ const common = @import("zig_common");
 const modulefile = @import("modulefile.zig");
 const pyfmt = @import("pyfmt.zig");
 const probe = @import("probe.zig");
+const admin = @import("admin.zig");
 
 const sys = common.sys;
 const fsx = common.fsx;
@@ -94,7 +95,7 @@ fn usageError(usage: []const u8, who: []const u8, comptime f: []const u8, args: 
 }
 
 /// "eb-staged-rebuild: MESSAGE" on stderr, status 2: a refusal or an OSError.
-fn refuse(comptime f: []const u8, args: anytype) noreturn {
+pub fn refuse(comptime f: []const u8, args: anytype) noreturn {
     cli.err(prog ++ ": " ++ f ++ "\n", args);
     std.process.exit(2);
 }
@@ -214,7 +215,7 @@ fn generationComplete(a: Allocator, path: []const u8) bool {
     return false;
 }
 
-fn osError(a: Allocator, err: anyerror, path: []const u8) []const u8 {
+pub fn osError(a: Allocator, err: anyerror, path: []const u8) []const u8 {
     const t: struct { n: u32, s: []const u8 } = switch (err) {
         error.NotFound => .{ .n = 2, .s = "No such file or directory" },
         error.AccessDenied => .{ .n = 13, .s = "Permission denied" },
@@ -273,7 +274,7 @@ fn needsIntervention(comptime f: []const u8, args: anytype) noreturn {
 }
 
 /// load_journal with its schema checks.
-fn loadJournal(a: Allocator, path: []const u8) Py {
+pub fn loadJournal(a: Allocator, path: []const u8) Py {
     const f = fsx.openRegular(fsx.cwd, path, true) catch |err| needsIntervention("journal cannot be read: {s}: {s}", .{ path, osError(a, err, path) });
     defer sys.close(f.fd);
     const data = fsx.readAll(a, f.fd, 256 << 20) catch |err| needsIntervention("journal cannot be read: {s}: {s}", .{ path, osError(a, err, path) });
@@ -308,7 +309,7 @@ fn loadJournal(a: Allocator, path: []const u8) Py {
     return j;
 }
 
-fn requireDirectorySwap(a: Allocator, j: Py) void {
+pub fn requireDirectorySwap(a: Allocator, j: Py) void {
     if (pyfmt.get(j, "publication")) |p| {
         const ok = p == .null or (p == .str and std.mem.eql(u8, p.str, "directory-swap"));
         if (!ok) {
@@ -340,7 +341,7 @@ fn lessName(_: void, x: []const u8, y: []const u8) bool {
     return json.pyTextLess(x, y);
 }
 
-fn listJournals(a: Allocator, state_root: []const u8) []const Py {
+pub fn listJournals(a: Allocator, state_root: []const u8) []const Py {
     var found: std.ArrayList(Py) = .empty;
     const runs = std.fs.path.join(a, &.{ state_root, "runs" }) catch return &.{};
     const fd = fsx.openDir(fsx.cwd, runs, true) catch return &.{};
@@ -438,6 +439,143 @@ fn cmdStatus(a: Allocator, args: []const []const u8) u8 {
     return 0;
 }
 
+const retire_usage =
+    \\usage: eb-staged-rebuild retire [-h] --state-root STATE_ROOT
+    \\                                --module-file MODULE_FILE [--reason REASON]
+    \\                                [--dry-run] [--lock-timeout LOCK_TIMEOUT]
+    \\
+;
+const retire_help = retire_usage ++
+    \\
+    \\options:
+    \\  -h, --help            show this help message and exit
+    \\  --state-root STATE_ROOT
+    \\  --module-file MODULE_FILE
+    \\                        module file to retire
+    \\  --reason REASON
+    \\  --dry-run
+    \\  --lock-timeout LOCK_TIMEOUT
+    \\                        seconds to wait for the lock (default: refuse at once)
+    \\
+;
+const rollback_usage =
+    \\usage: eb-staged-rebuild rollback [-h] --state-root STATE_ROOT
+    \\                                  [--lock-timeout LOCK_TIMEOUT]
+    \\                                  run_id
+    \\
+;
+const rollback_help = rollback_usage ++
+    \\
+    \\positional arguments:
+    \\  run_id
+    \\
+    \\options:
+    \\  -h, --help            show this help message and exit
+    \\  --state-root STATE_ROOT
+    \\  --lock-timeout LOCK_TIMEOUT
+    \\
+;
+const gc_usage =
+    \\usage: eb-staged-rebuild gc [-h] --state-root STATE_ROOT
+    \\                            [--grace-hours GRACE_HOURS] [--dry-run]
+    \\                            [--lock-timeout LOCK_TIMEOUT] [--include-failed]
+    \\
+;
+const gc_help = gc_usage ++
+    \\
+    \\options:
+    \\  -h, --help            show this help message and exit
+    \\  --state-root STATE_ROOT
+    \\  --grace-hours GRACE_HOURS
+    \\  --dry-run
+    \\  --lock-timeout LOCK_TIMEOUT
+    \\  --include-failed      also remove failed runs that published nothing and are
+    \\                        older than the grace period
+    \\
+;
+
+/// argparse type=float: Python float() of the text.
+fn floatArg(usage: []const u8, who: []const u8, name: []const u8, v: []const u8) f64 {
+    const t = std.mem.trim(u8, v, " \t\n\r\x0b\x0c");
+    return std.fmt.parseFloat(f64, t) catch usageError(usage, who, "argument --{s}: invalid float value: '{s}'", .{ name, v });
+}
+
+fn missing(a: Allocator, usage: []const u8, who: []const u8, names: []const []const u8) void {
+    if (names.len == 0) return;
+    usageError(usage, who, "the following arguments are required: {s}", .{std.mem.join(a, ", ", names) catch ""});
+}
+
+fn adminCtx(a: Allocator, env: probe.Env) admin.Ctx {
+    return .{ .a = a, .env = env, .pause = .{ .env = env } };
+}
+
+fn cmdRetire(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
+    var opts = [_]Opt{
+        .{ .name = "state-root", .takes_value = true },
+        .{ .name = "module-file", .takes_value = true },
+        .{ .name = "reason", .takes_value = true },
+        .{ .name = "dry-run", .takes_value = false },
+        .{ .name = "lock-timeout", .takes_value = true },
+    };
+    const who = prog ++ " retire";
+    var extra: std.ArrayList([]const u8) = .empty;
+    const pos = parseOpts(a, args, &opts, retire_help, retire_usage, who, &extra);
+    var need: std.ArrayList([]const u8) = .empty;
+    if (opts[0].value == null) need.append(a, "--state-root") catch {};
+    if (opts[1].value == null) need.append(a, "--module-file") catch {};
+    missing(a, retire_usage, who, need.items);
+    var all_extra = extra;
+    for (pos) |p| all_extra.append(a, p) catch {};
+    unrecognized(a, all_extra.items);
+    const timeout: f64 = if (opts[4].value) |v| floatArg(retire_usage, who, "lock-timeout", v) else 0;
+    var ctx = adminCtx(a, env);
+    return admin.retire(&ctx, opts[0].value.?, opts[1].value.?, opts[2].value, opts[3].seen, timeout);
+}
+
+fn cmdRollback(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
+    var opts = [_]Opt{
+        .{ .name = "state-root", .takes_value = true },
+        .{ .name = "lock-timeout", .takes_value = true },
+    };
+    const who = prog ++ " rollback";
+    var extra: std.ArrayList([]const u8) = .empty;
+    const pos = parseOpts(a, args, &opts, rollback_help, rollback_usage, who, &extra);
+    var need: std.ArrayList([]const u8) = .empty;
+    if (opts[0].value == null) need.append(a, "--state-root") catch {};
+    if (pos.len == 0) need.append(a, "run_id") catch {};
+    missing(a, rollback_usage, who, need.items);
+    var all_extra = extra;
+    for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    unrecognized(a, all_extra.items);
+    const timeout: ?f64 = if (opts[1].value) |v| floatArg(rollback_usage, who, "lock-timeout", v) else null;
+    var ctx = adminCtx(a, env);
+    return admin.rollback(&ctx, opts[0].value.?, pos[0], timeout);
+}
+
+fn cmdGc(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
+    var opts = [_]Opt{
+        .{ .name = "state-root", .takes_value = true },
+        .{ .name = "grace-hours", .takes_value = true },
+        .{ .name = "dry-run", .takes_value = false },
+        .{ .name = "lock-timeout", .takes_value = true },
+        .{ .name = "include-failed", .takes_value = false },
+    };
+    const who = prog ++ " gc";
+    var extra: std.ArrayList([]const u8) = .empty;
+    const pos = parseOpts(a, args, &opts, gc_help, gc_usage, who, &extra);
+    if (opts[0].value == null) missing(a, gc_usage, who, &.{"--state-root"});
+    var all_extra = extra;
+    for (pos) |p| all_extra.append(a, p) catch {};
+    unrecognized(a, all_extra.items);
+    const grace: f64 = if (opts[1].value) |v| floatArg(gc_usage, who, "grace-hours", v) else blk: {
+        const e = env.get("EB_STAGED_REBUILD_GRACE_HOURS") orelse break :blk admin.default_grace_hours;
+        break :blk std.fmt.parseFloat(f64, std.mem.trim(u8, e, " \t\n\r\x0b\x0c")) catch refuse("EB_STAGED_REBUILD_GRACE_HOURS is not a number: '{s}'", .{e});
+    };
+    const timeout: ?f64 = if (opts[3].value) |v| floatArg(gc_usage, who, "lock-timeout", v) else null;
+    var ctx = adminCtx(a, env);
+    return admin.gc(&ctx, opts[0].value.?, grace, opts[2].seen, opts[4].seen, timeout);
+}
+
 // ---- probe -------------------------------------------------------------
 
 fn cmdProbe(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
@@ -499,11 +637,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (std.mem.eql(u8, cmd, "resolve")) return cmdResolve(a, rest);
     if (std.mem.eql(u8, cmd, "status")) return cmdStatus(a, rest);
     if (std.mem.eql(u8, cmd, "probe")) return cmdProbe(a, rest, env);
+    if (std.mem.eql(u8, cmd, "retire")) return cmdRetire(a, rest, env);
+    if (std.mem.eql(u8, cmd, "rollback")) return cmdRollback(a, rest, env);
+    if (std.mem.eql(u8, cmd, "gc")) return cmdGc(a, rest, env);
     for (commands) |c| if (std.mem.eql(u8, c, cmd)) refuse("{s} is not in this build yet; use the Python eb-staged-rebuild", .{cmd});
     usageError(top_usage, prog, "argument command: invalid choice: '{s}' (choose from 'probe', 'run', 'resume', 'rollback', 'gc', 'retire', 'status', 'resolve')", .{cmd});
 }
 
 test {
+    _ = admin;
     _ = modulefile;
     _ = pyfmt;
     _ = probe;

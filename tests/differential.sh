@@ -1,7 +1,8 @@
 #!/bin/bash
 # Run the Python tool (python3 -m eb_staged_rebuild) and the Zig build
-# (TOOL_BIN) on the same read-only invocations and compare exit code,
-# stdout and stderr.
+# (TOOL_BIN) on the same invocations and compare exit code, stdout and
+# stderr; for commands that change a fixture, also the journals and the
+# tree they leave.
 #   TOOL_BIN=zig-out/bin/eb-staged-rebuild bash tests/differential.sh
 set -u
 : "${TOOL_BIN:?}"
@@ -96,6 +97,65 @@ compare "top level, nothing"
 compare "top level --help" --help
 compare "--version" --version
 compare "unknown command" bogus
+
+# Commands that change a fixture: each implementation gets its own copy,
+# and run ids and timestamps are normalized before the comparison.
+norm() {
+    sed -E -e 's/[0-9]{8}T[0-9]{6}Z(-[0-9]+)?/STAMP/g' \
+        -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z/ISO/g' \
+        -e 's/[0-9]{10}\.[0-9]+/TIME/g' -e "s#${work}/(py|zig)#W#g"
+}
+fixture() {
+    local root=$1
+    mkdir -p "${root}/modules/all/demo" "${root}/software/demo/1/easybuild" "${root}/state/runs/r1"
+    touch "${root}/software/demo/1/easybuild/demo-1.eb"
+    # A relative root, so both copies of the module file have the same bytes
+    # and the same hash; each implementation runs from its own copy.
+    printf 'local root = "software/demo/1"\n' > "${root}/modules/all/demo/1.lua"
+    mkdir -p "${root}/software/old/.2.0001/sub" "${root}/software/old/2"
+    touch "${root}/software/old/.2.0001/sub/file"
+    printf '{"schema": 2, "run_id": "r1", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "old/2", "status": "published", "live_software": "%s/software/old/2", "retired": "%s/software/old/.2.0001", "published_at": 1000.5}]}\n' "${root}" "${root}" > "${root}/state/runs/r1/journal.json"
+}
+compare_admin() {
+    local label=$1; shift
+    local impl root out a f bad=0
+    for impl in py zig; do
+        root="${work}/${impl}"
+        out="${work}/${impl}.admin"
+        local -a cmd args=()
+        local rid
+        if [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild); else cmd=("${TOOL_BIN}"); fi
+        rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | head -1)
+        for a in "$@"; do a="${a//@ROOT@/${root}}"; args+=("${a//@RETIRE@/${rid}}"); done
+        (cd "${root}" && "${cmd[@]}" "${args[@]}") > "${out}.out" 2> "${out}.err"
+        echo $? > "${out}.rc"
+        find "${root}" -name journal.json -print0 | sort -z | xargs -0 -r cat > "${out}.journals"
+        (cd "${root}" && find . -not -name '.lock*' | sort) > "${out}.tree"
+        for f in out err journals tree; do norm < "${out}.${f}" > "${out}.${f}.n"; done
+    done
+    for f in rc out.n err.n journals.n tree.n; do
+        if ! cmp -s "${work}/py.admin.${f}" "${work}/zig.admin.${f}"; then
+            [ "${bad}" -eq 0 ] && echo "DIFF ${label}"
+            bad=1
+            diff "${work}/py.admin.${f}" "${work}/zig.admin.${f}" | head -20 | sed "s/^/     ${f} /"
+        fi
+    done
+    if [ "${bad}" -eq 0 ]; then echo "same ${label}"; else diffs=$((diffs + 1)); fi
+}
+fixture "${work}/py"
+fixture "${work}/zig"
+compare_admin "retire --dry-run" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua --dry-run
+compare_admin "retire" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua --reason moved
+compare_admin "retire again" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua
+compare_admin "status after retire" status --state-root @ROOT@/state
+compare_admin "gc keeps within grace" gc --state-root @ROOT@/state --dry-run
+compare_admin "gc removes past grace" gc --state-root @ROOT@/state --grace-hours 0
+compare_admin "gc again" gc --state-root @ROOT@/state --grace-hours 0
+compare_admin "rollback the retire" rollback --state-root @ROOT@/state @RETIRE@
+compare_admin "rollback again" rollback --state-root @ROOT@/state @RETIRE@
+compare_admin "retire, no module file" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/none.lua
+compare_admin "retire, missing options" retire
+compare_admin "gc, bad grace" gc --state-root @ROOT@/state --grace-hours x
 
 echo "${diffs} differences"
 [ "${diffs}" -eq 0 ]
