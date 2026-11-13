@@ -165,6 +165,70 @@ class HardKillTests(unittest.TestCase):
             with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "v0\n")
 
+    def test_sigkill_right_after_rollback_exchange_rolls_back_once(self):
+        # The rollback exchange happened and the journal does not say so; a
+        # second rollback must not exchange the trees again.
+        with tempfile.TemporaryDirectory() as root:
+            software = os.path.join(root, "software")
+            modules = os.path.join(root, "modules")
+            state = os.path.join(root, "state")
+            os.makedirs(software)
+            os.makedirs(modules)
+            install, _module, _text = classic_install(
+                software, modules, "demo/1", "v0\n", "all/demo/1.lua"
+            )
+            import copy
+            from eb_staged_rebuild.engine import Spec, run
+            from eb_staged_rebuild.faults import FaultInjector
+
+            probes = copy.deepcopy(PROBES)
+            probes["rename_exchange"] = {"ok": True}
+            published = run(Spec(
+                software=software,
+                modules=modules,
+                state_root=state,
+                eb_args=["demo-1.eb"],
+                backend="installpath",
+                module_rels=["demo/1"],
+                builder=installpath_builder(
+                    [{"rel": "demo/1", "payload": "v1\n", "module_rel": "all/demo/1.lua"}]
+                ),
+                faults=FaultInjector(),
+                run_id="run1",
+                probes=probes,
+            ))
+            self.assertEqual(published.returncode, 0, published.message)
+            ready = os.path.join(root, "ready")
+            script = f"from eb_staged_rebuild.engine import rollback\nrollback({state!r}, 'run1')\n"
+            env = os.environ.copy()
+            env["EB_STAGED_REBUILD_PAUSE_AT"] = "rollback.swap:all/demo/1.lua.exchange.after"
+            env["EB_STAGED_REBUILD_PAUSE_READY"] = ready
+            env["EB_STAGED_REBUILD_PAUSE_SECONDS"] = "30"
+            child = subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                cwd=os.path.dirname(os.path.dirname(__file__)),
+            )
+            try:
+                deadline = time.monotonic() + 20
+                while not os.path.exists(ready) and time.monotonic() < deadline:
+                    self.assertIsNone(child.poll(), "rollback exited before the exchange pause")
+                    time.sleep(0.05)
+                self.assertTrue(os.path.exists(ready), "rollback pause was not reached")
+                os.kill(child.pid, signal.SIGKILL)
+                self.assertEqual(child.wait(timeout=10), -signal.SIGKILL)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            result = rollback(state, "run1")
+            self.assertEqual(result.returncode, 0, result.message)
+            with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "v0\n")
+            self.assertEqual(rollback(state, "run1").returncode, 0)
+            with open(os.path.join(install, "PAYLOAD"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "v0\n")
+
     def test_sigkill_during_rollback_fallback_is_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
             software = os.path.join(root, "software")
