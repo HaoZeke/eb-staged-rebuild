@@ -167,5 +167,18 @@ compare_admin "retire, no module file" retire --state-root @ROOT@/state --module
 compare_admin "retire, missing options" retire
 compare_admin "gc, bad grace" gc --state-root @ROOT@/state --grace-hours x
 
+# The live-tree snapshot a journal records, compared as JSON.
+snap="${work}/snaptree"
+mkdir -p "${snap}/a/b" "${snap}/c"
+printf 'x' > "${snap}/a/b/f"
+printf 'y' > "${snap}/top"
+ln -s ../c "${snap}/a/dirlink"
+ln -s top "${snap}/filelink"
+for p in "${snap}" "${snap}/top" "${snap}/filelink" "${snap}/missing"; do
+    PYTHONPATH="${repo_root}" python3 -c 'import json, sys; from eb_staged_rebuild.livecheck import snapshot; print(json.dumps(snapshot(sys.argv[1]), indent=2, sort_keys=True))' "${p}" > "${work}/snap.py"
+    "${TOOL_BIN}" __snapshot "${p}" > "${work}/snap.zig"
+    if cmp -s "${work}/snap.py" "${work}/snap.zig"; then echo "same snapshot ${p##*/}"; else echo "DIFF snapshot ${p##*/}"; diff "${work}/snap.py" "${work}/snap.zig" | head -20; diffs=$((diffs + 1)); fi
+done
+
 echo "${diffs} differences"
 [ "${diffs}" -eq 0 ]

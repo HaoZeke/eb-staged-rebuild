@@ -731,6 +731,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const args: []const []const u8 = if (all.len > 1) @ptrCast(all[1..]) else &.{};
     const env: probe.Env = .{ .envp = init.environ.block.slice.ptr };
 
+    // Internal: the live-tree snapshot as JSON, for the differential tests.
+    if (args.len == 2 and std.mem.eql(u8, args[0], "__snapshot")) {
+        const snap = @import("livecheck.zig").snapshot(a, args[1]) catch |err| refuse("{s}", .{osError(a, err, args[1])});
+        cli.put(1, json.dumps(a, snap, 2, true) catch return 1);
+        cli.put(1, "\n");
+        return 0;
+    }
     // The user-namespace sandbox re-executes this program.
     if (args.len > 0 and std.mem.eql(u8, args[0], probe.sandbox_command)) return probe.sandboxMain(a, env, args[1..]);
 
@@ -764,6 +771,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
 test {
     _ = @import("swap.zig");
+    _ = @import("livecheck.zig");
+    _ = @import("discover.zig");
     _ = admin;
     _ = engine;
     _ = modulefile;
