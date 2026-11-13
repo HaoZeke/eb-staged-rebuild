@@ -286,7 +286,7 @@ fn save(a: Allocator, run_dir: []const u8, data: Py, faults: atomic.Faults, step
     const raw = try std.fmt.allocPrint(a, "{s}\n", .{try json.dumps(a, data, 2, true)});
     var w: atomic.Why = .{};
     atomic.atomicWrite(a, outboxPath(a, run_dir), raw, .{ .faults = faults, .step = step }, &w) catch |err| {
-        why.* = if (err == error.Refused) w.msg else @errorName(err);
+        why.* = if (err == error.Refused) w.msg else main_mod.osError(a, err, outboxPath(a, run_dir));
         return error.Refused;
     };
 }
@@ -345,7 +345,7 @@ pub fn deliver(a: Allocator, env_envp: common.proc.Envp, run_dir: []const u8, co
         if (!same) {
             var w: atomic.Why = .{};
             atomic.atomicWrite(a, record_path, body, .{ .faults = faults, .step = try std.fmt.allocPrint(a, "outbox.record:{s}", .{id}) }, &w) catch |err| {
-                why.* = if (err == error.Refused) w.msg else @errorName(err);
+                why.* = if (err == error.Refused) w.msg else main_mod.osError(a, err, record_path);
                 return error.Refused;
             };
         }

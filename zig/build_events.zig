@@ -621,7 +621,7 @@ const Op = struct {
         const raw = try std.fmt.allocPrint(op.a, "{s}\n", .{try json.dumps(op.a, st, 2, true)});
         var w: atomic.Why = .{};
         atomic.atomicWrite(op.a, op.path, raw, .{ .faults = op.ctx.faults(), .step = try std.fmt.allocPrint(op.a, "build_events.{s}", .{step}) }, &w) catch |err|
-            return refuse(op.a, "{s}", .{if (err == error.Refused) w.msg else @errorName(err)});
+            return refuse(op.a, "{s}", .{if (err == error.Refused) w.msg else main_mod.osError(op.a, err, op.path)});
     }
 
     /// Refuse a retry whose policy or metadata differ from the recorded one.
