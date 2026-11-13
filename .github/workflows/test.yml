@@ -62,9 +62,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # argparse's usage wrapping and choice quoting change between Python
+      # releases; the binary prints what Python 3.14 prints.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       # setup-zig checks the tarball's minisign signature against the Zig
       # project's key.
       - uses: mlugg/setup-zig@v2
