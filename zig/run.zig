@@ -17,6 +17,7 @@ const livecheck = @import("livecheck.zig");
 const discover = @import("discover.zig");
 const modulefile = @import("modulefile.zig");
 const builders = @import("builders.zig");
+const publish_mod = @import("publish.zig");
 
 const sys = common.sys;
 const fsx = common.fsx;
@@ -938,12 +939,82 @@ fn failRun(r: *R, message: []const u8, code: u8) E!Result {
     return .{ .code = code, .message = message };
 }
 
+/// _publisher: the ledger configuration a journal recorded, checked against
+/// the file it came from; null without a ledger.
+fn publisher(r: *R) E!?Py {
+    const path = r.str("ledger_config");
+    if (path.len == 0) return null;
+    const policy = r.get("ledger_policy");
+    if (policy == null or policy.? == .null) return r.refuse("ledger policy is missing from the journal; inspect the publication before resuming", .{});
+    var why: []const u8 = "";
+    const now_config = publish_mod.loadConfig(r.a, path, &why) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => r.refuse("{s}", .{why}),
+    };
+    if (!publish_mod.sameValue(r.a, now_config, policy.?)) return r.refuse("ledger policy changed; restore the recorded configuration before resuming", .{});
+    return policy.?;
+}
+
+fn record(r: *R, config: Py, recs_in: []const Py, step: ?[]const u8) E![]const Py {
+    const rdir = runDir(r.a, r.str("state_root"), r.str("run_id"));
+    var why: []const u8 = "";
+    if (recs_in.len > 0) publish_mod.enqueue(r.a, rdir, recs_in, r.faults(), step.?, &why) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.NeedsIntervention => r.intervene("{s}", .{why}),
+        error.Refused => r.refuse("{s}", .{why}),
+    };
+    return publish_mod.deliver(r.a, r.env.envp, rdir, config, r.faults(), &why) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.NeedsIntervention => r.intervene("{s}", .{why}),
+        error.Refused => r.refuse("{s}", .{why}),
+    };
+}
+
+fn records(r: *R, config: Py, stage: []const u8, corrects: ?*const publish_mod.Corrects) E![]const Py {
+    var why: []const u8 = "";
+    return publish_mod.publicationRecords(r.a, config, r.journal, stage, now(), corrects, &why) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => r.refuse("{s}", .{why}),
+    };
+}
+
+fn required(config: Py) bool {
+    return pyfmt.truthy(pyfmt.get(config, "required"));
+}
+
+fn recordFinished(r: *R, config: ?Py, message: []const u8) E!Result {
+    if (config) |c| {
+        const left = try record(r, c, try records(r, c, "finished", null), "outbox.finished");
+        if (left.len > 0) {
+            const m = try std.fmt.allocPrint(r.a, "{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
+            log("{s}", .{m});
+            return .{ .code = publish_mod.pending_exit, .message = m };
+        }
+    }
+    return .{ .code = 0, .message = message };
+}
+
+/// _publish_recorded: swap only after a required ledger acknowledged every
+/// started record.
 fn publishRecorded(r: *R) E!Result {
     const rc = try preparePublication(r);
     if (rc != 0) return .{ .code = rc, .message = r.str("message") };
+    const config = try publisher(r);
+    if (config) |c| {
+        try validatePublicationSet(r);
+        const left = try record(r, c, try records(r, c, "started", null), "outbox.started");
+        if (left.len > 0 and required(c)) {
+            const m = try std.fmt.allocPrint(r.a, "the live directory was not swapped: {s}", .{publish_mod.pendingMessage(r.a, left)});
+            r.set("message", Py.s(m));
+            try r.save("journal.ledger_pending");
+            log("{s}", .{m});
+            return .{ .code = publish_mod.pending_exit, .message = m };
+        }
+    }
     try publish(r);
-    log("run {s} published {d} module(s)", .{ r.str("run_id"), r.list("modules_plan").len });
-    return .{ .code = 0 };
+    const message = try std.fmt.allocPrint(r.a, "run {s} published {d} module(s)", .{ r.str("run_id"), r.list("modules_plan").len });
+    log("{s}", .{message});
+    return recordFinished(r, config, message);
 }
 
 fn runLocked(r: *R, fresh_build: bool) E!Result {
@@ -987,6 +1058,15 @@ pub fn run(r: *R, probes: Py) E!Result {
         const reason = if (pyfmt.truthy(pyfmt.get(u, "reason"))) s(pyfmt.get(u, "reason")) else "the user-namespace sandbox is not usable";
         return r.refuse("{s}; refusing to run the userns backend", .{reason});
     }
+    var policy: Py = .null;
+    if (r.spec.ledger_config) |lc| {
+        var why: []const u8 = "";
+        policy = publish_mod.loadConfig(a, lc, &why) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => r.refuse("{s}", .{why}),
+        };
+        r.spec.ledger_config = s(pyfmt.get(policy, "path"));
+    }
     const rels = try learnRels(r);
     for (rels) |rel| try checkInstallDir(r, rel);
     var run_id: []const u8 = r.spec.run_id orelse "";
@@ -1025,8 +1105,8 @@ pub fn run(r: *R, probes: Py) E!Result {
         .{ .key = "grace_hours", .value = .{ .float = r.spec.grace_hours } },
         .{ .key = "skip_live_check", .value = .{ .bool = r.spec.skip_live_check } },
         .{ .key = "prepare_executable", .value = Py.opt(r.spec.prepare_executable) },
-        .{ .key = "ledger_config", .value = .null },
-        .{ .key = "ledger_policy", .value = .null },
+        .{ .key = "ledger_config", .value = Py.opt(r.spec.ledger_config) },
+        .{ .key = "ledger_policy", .value = policy },
         .{ .key = "prepare_complete", .value = .{ .bool = false } },
         .{ .key = "prepare_returncode", .value = .null },
         .{ .key = "publication", .value = Py.s("directory-swap") },
@@ -1091,7 +1171,6 @@ pub fn resumeRun(a: Allocator, env: probe.Env, ctx: *admin.Ctx, state_root: []co
     if (std.mem.eql(u8, s(pyfmt.get(j, "kind")), "retire")) main_mod.refuse("run {s} is a retire record; rollback restores the module file", .{run_id});
     var r: R = .{ .a = a, .env = env, .ctx = ctx, .spec = specFromJournal(a, j, lock_timeout), .path = path };
     defer main_mod.last_why = r.why;
-    if (r.spec.ledger_config != null) main_mod.refuse("a run with a ledger configuration is not in this build yet; use the Python eb-staged-rebuild", .{});
     engine.checkRoots(a, r.spec);
     const l = try lockRoot(&r);
     defer l.release();
@@ -1103,8 +1182,9 @@ pub fn resumeRun(a: Allocator, env: probe.Env, ctx: *admin.Ctx, state_root: []co
         published = true;
     };
     if (std.mem.eql(u8, state_name, "complete")) {
-        log("run {s} is already complete", .{run_id});
-        return .{ .code = 0 };
+        const m = try std.fmt.allocPrint(a, "run {s} is already complete", .{run_id});
+        log("{s}", .{m});
+        return recordFinished(&r, try publisher(&r), m);
     }
     if (std.mem.eql(u8, state_name, "rolled_back")) return r.refuse("run {s} was rolled back; start a new run", .{run_id});
     if (std.mem.eql(u8, state_name, "created") or std.mem.eql(u8, state_name, "building") or std.mem.eql(u8, state_name, "failed")) {
@@ -1123,17 +1203,53 @@ pub fn resumeRun(a: Allocator, env: probe.Env, ctx: *admin.Ctx, state_root: []co
 pub fn rollbackRun(r: *R) E!Result {
     const a = r.a;
     const run_id = r.str("run_id");
+    const config = try publisher(r);
+    var finished: publish_mod.Corrects = .empty;
+    var started = false;
+    if (config) |c| {
+        const left = try record(r, c, &.{}, null);
+        if (left.len > 0 and required(c)) {
+            const m = try std.fmt.allocPrint(a, "run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
+            log("{s}", .{m});
+            return .{ .code = publish_mod.pending_exit, .message = m };
+        }
+        var why: []const u8 = "";
+        const data = publish_mod.load(a, runDir(a, r.str("state_root"), run_id), &why) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.NeedsIntervention => r.intervene("{s}", .{why}),
+            error.Refused => r.refuse("{s}", .{why}),
+        };
+        for ((pyfmt.get(data, "events") orelse Py{ .list = &.{} }).list) |ev| {
+            const rec = pyfmt.get(ev, "record") orelse continue;
+            const stage = s(pyfmt.get(rec, "stage"));
+            if (std.mem.eql(u8, stage, "started")) started = true;
+            if (std.mem.eql(u8, s(pyfmt.get(ev, "status")), "acknowledged") and !std.mem.eql(u8, s(pyfmt.get(rec, "action")), "correction") and std.mem.eql(u8, stage, "finished")) {
+                const mf = s(pyfmt.get(pyfmt.get(rec, "build") orelse Py{ .dict = &.{} }, "module_file"));
+                const id = pyfmt.get(pyfmt.get(ev, "receipt") orelse Py{ .dict = &.{} }, "id") orelse .null;
+                try finished.put(a, mf, id);
+            }
+        }
+    }
     if (std.mem.eql(u8, r.str("state"), "rolled_back")) {
         var all = true;
         for (r.list("modules_plan")) |m| if (!std.mem.eql(u8, s(pyfmt.get(m, "status")), "restored")) {
             all = false;
         };
         if (all) {
-            log("run {s} is already rolled back", .{run_id});
-            return .{ .code = 0 };
+            const m = try std.fmt.allocPrint(a, "run {s} is already rolled back", .{run_id});
+            log("{s}", .{m});
+            return recordRollback(r, config, &finished, started, m);
         }
     }
     if (!std.mem.eql(u8, r.str("state"), "complete")) return r.refuse("run {s} is {s}; only a complete run can roll back", .{ run_id, r.str("state") });
+    if (config) |c| if (finished.count() > 0) {
+        const left = try record(r, c, try records(r, c, "started", &finished), "outbox.rollback_started");
+        if (left.len > 0 and required(c)) {
+            const m = try std.fmt.allocPrint(a, "run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
+            log("{s}", .{m});
+            return .{ .code = publish_mod.pending_exit, .message = m };
+        }
+    };
     rollbackSteps(r) catch |err| {
         const first = r.why;
         restorePublished(r) catch return r.intervene("rollback failed and the published tree could not be restored: {s}", .{r.why});
@@ -1143,9 +1259,28 @@ pub fn rollbackRun(r: *R) E!Result {
         r.why = first;
         return err;
     };
-    log("run {s} rolled back; replacement kept at its retired path", .{run_id});
-    _ = a;
-    return .{ .code = 0 };
+    const m = try std.fmt.allocPrint(a, "run {s} rolled back; replacement kept at its retired path", .{run_id});
+    log("{s}", .{m});
+    return recordRollback(r, config, &finished, started, m);
+}
+
+/// _record_rollback: finish the correction, or abort a publication that
+/// never finished.
+fn recordRollback(r: *R, config: ?Py, finished: *const publish_mod.Corrects, started: bool, message: []const u8) E!Result {
+    const c = config orelse return .{ .code = 0, .message = message };
+    var recs: []const Py = &.{};
+    if (finished.count() > 0) {
+        recs = try records(r, c, "finished", finished);
+    } else if (started) {
+        recs = try records(r, c, "aborted", null);
+    }
+    const left = try record(r, c, recs, "outbox.rollback_finished");
+    if (left.len > 0) {
+        const m = try std.fmt.allocPrint(r.a, "{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
+        log("{s}", .{m});
+        return .{ .code = publish_mod.pending_exit, .message = m };
+    }
+    return .{ .code = 0, .message = message };
 }
 
 fn rollbackSteps(r: *R) E!void {

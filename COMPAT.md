@@ -1,13 +1,12 @@
 # The Zig build and the Python tool
 
-The Zig build in `zig/` is being ported command by command, in the order the
-port plan sets. In this build: `probe`, `status`, `resolve`, `retire`, `gc`,
-`run`, `resume` and `rollback` for runs without `--ledger-config`; the ledger
-maintenance entry point as `ledger-maintenance`. Still to come: runs with
-`--ledger-config`, which publish through the ledger outbox. Such a run exits 2
-with `eb-staged-rebuild: ... is not in this build yet`. The Python tool stays
-the one to use until every command is ported and the test suite passes
-against the binary through `TOOL_BIN`.
+The Zig build in `zig/` carries every command of the Python tool: `probe`,
+`status`, `resolve`, `retire`, `gc`, `run`, `resume` and `rollback`, with or
+without `--ledger-config`, and the ledger maintenance entry point as
+`ledger-maintenance`. The `build_events` module's own entry point
+(`python3 -m eb_staged_rebuild.build_events`) is not ported yet. The Python
+tool stays the one to use until the test suite passes against the binary
+through `TOOL_BIN`.
 
 `tests/differential.sh` runs both on the same invocations and fails on any
 difference in exit code, stdout or stderr; for the commands that change a fixture

@@ -820,6 +820,7 @@ pub var last_why: []const u8 = "";
 
 test {
     _ = @import("run.zig");
+    _ = @import("publish.zig");
     _ = @import("swap.zig");
     _ = @import("livecheck.zig");
     _ = @import("discover.zig");

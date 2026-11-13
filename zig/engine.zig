@@ -177,7 +177,6 @@ fn strOr(v: ?Py, fallback: []const u8) []const u8 {
 pub fn run(a: Allocator, env: probe.Env, spec_in: Spec) u8 {
     var spec = spec_in;
     checkRoots(a, spec);
-    if (spec.ledger_config != null) refuse("--ledger-config is not in this build yet; use the Python eb-staged-rebuild", .{});
     const probes = probe.probeAll(a, env, spec.software, spec.eb_executable) catch |err| refuse("{s}", .{main_mod.osError(a, err, spec.software)});
     if (std.mem.eql(u8, spec.backend, "auto")) {
         spec.backend = if (usable(probes, "bwrap")) "bwrap" else if (usable(probes, "userns_sandbox")) "userns" else "installpath";

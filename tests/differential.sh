@@ -106,7 +106,7 @@ norm() {
         -e 's/[0-9]{10}\.[0-9]+/TIME/g' -e "s#${work}/(py|zig)#W#g" \
         -e 's#[^ ]*python[0-9.]* -m eb_staged_rebuild\.userns_sandbox#SANDBOX#' \
         -e "s#${TOOL_BIN} __userns-sandbox#SANDBOX#" |
-    if [ -n "${NORM_HASH:-}" ]; then sed -E 's/[0-9a-f]{64}/HASH/g'; else cat; fi |
+    if [ -n "${NORM_HASH:-}" ]; then sed -E -e 's/[0-9a-f]{64}/HASH/g' -e 's#eb-staged-rebuild/[0-9a-f]{16}/#eb-staged-rebuild/SCOPE/#g'; else cat; fi |
     # The sandbox command in a journal's eb_command list, one item per line.
     perl -0pe 's/"[^"\n]*python[0-9.]*",\n\s*"-m",\n\s*"eb_staged_rebuild\.userns_sandbox",/"SANDBOX",/g; s/"\Q$ENV{TOOL_BIN}\E",\n\s*"__userns-sandbox",/"SANDBOX",/g' 
 }
@@ -122,6 +122,9 @@ fixture() {
     printf '{"schema": 2, "run_id": "r1", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "old/2", "status": "published", "live_software": "%s/software/old/2", "retired": "%s/software/old/.2.0001", "published_at": 1000.5}]}\n' "${root}" "${root}" > "${root}/state/runs/r1/journal.json"
     printf '#!/bin/sh\nexec python3 "%s/tests/fake_eb.py" "$@"\n' "${repo_root}" > "${root}/eb"
     chmod +x "${root}/eb"
+    printf '#!/bin/sh\nexec python3 "%s/tests/fake_eb_stack.py" "$@"\n' "${repo_root}" > "${root}/ebstack"
+    chmod +x "${root}/ebstack"
+    printf '{"eb_stack": "%s/ebstack", "log": "%s/ledger.jsonl", "key": "%s/key.pem", "head": "%s/head.json", "actor": "ci", "stack": "s", "target": "t"}\n' "${root}" "${root}" "${root}" "${root}" > "${root}/ledger.json"
 }
 compare_admin() {
     local label=$1; shift
@@ -133,8 +136,15 @@ compare_admin() {
         local rid
         if [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild); else cmd=("${TOOL_BIN}"); fi
         rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | head -1)
-        for a in "$@"; do a="${a//@ROOT@/${root}}"; args+=("${a//@RETIRE@/${rid}}"); done
-        (cd "${root}" && "${cmd[@]}" "${args[@]}") > "${out}.out" 2> "${out}.err"
+        for a in "$@"; do
+            a="${a//@ROOT@/${root}}"
+            if [ "${a}" = "@CMD@" ]; then args+=("${cmd[@]}"); else args+=("${a//@RETIRE@/${rid}}"); fi
+        done
+        if [ "${args[0]}" = env ]; then
+            (cd "${root}" && "${args[@]}") > "${out}.out" 2> "${out}.err"
+        else
+            (cd "${root}" && "${cmd[@]}" "${args[@]}") > "${out}.out" 2> "${out}.err"
+        fi
         echo $? > "${out}.rc"
         find "${root}" -name journal.json -print0 | sort -z | xargs -0 -r cat > "${out}.journals"
         (cd "${root}" && find . -not -name '.lock*' | sort) > "${out}.tree"
@@ -181,6 +191,14 @@ compare_admin "rollback the run" rollback --state-root @ROOT@/state r2
 compare_admin "rollback the run again" rollback --state-root @ROOT@/state r2
 compare_admin "resume a rolled-back run" resume --state-root @ROOT@/state r2
 compare_admin "run, userns" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend userns --eb @ROOT@/eb --run-id r4 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, ledger" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r5 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
+compare_admin "status, ledger run" status --state-root @ROOT@/state r5
+compare_admin "resume a complete ledger run" resume --state-root @ROOT@/state r5
+compare_admin "rollback a ledger run" rollback --state-root @ROOT@/state r5
+for impl in py zig; do echo fail-before > "${work}/${impl}/plan"; done
+export FAKE_LEDGER_PLAN_NAME=plan
+compare_admin "run, ledger append fails" env FAKE_LEDGER_PLAN=@ROOT@/plan @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r6 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
+compare_admin "resume delivers the record" resume --state-root @ROOT@/state r6
 compare_admin "run, eb fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb /bin/false --run-id r3 --skip-live-check --module demo/1 -- demo-1.eb
 unset NORM_HASH
 
