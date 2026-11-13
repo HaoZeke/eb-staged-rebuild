@@ -66,10 +66,31 @@ fn exited(pid: linux.pid_t) bool {
     return @backingInt(info.signo) != 0;
 }
 
-pub const RunError = error{ Refused, CannotStart };
+pub const RunError = error{ Refused, CannotStart, ExecFailed };
+
+/// The errno of the last execve that failed in the child (error.ExecFailed).
+pub var exec_errno: linux.E = .SUCCESS;
+
+/// The text Python's OSError gives for an errno execve returns.
+pub fn strerror(e: linux.E) []const u8 {
+    return switch (e) {
+        .NOENT => "No such file or directory",
+        .ACCES => "Permission denied",
+        .NOEXEC => "Exec format error",
+        .NOTDIR => "Not a directory",
+        .LOOP => "Too many levels of symbolic links",
+        .NAMETOOLONG => "File name too long",
+        .TXTBSY => "Text file busy",
+        .NOMEM => "Cannot allocate memory",
+        .@"2BIG" => "Argument list too long",
+        else => @tagName(e),
+    };
+}
 
 /// run_command: the command's exit code, 128 + signal for a signalled
-/// command, or 128 + the signal that interrupted this process.
+/// command, or 128 + the signal that interrupted this process. A command
+/// that cannot be executed gives error.ExecFailed with its errno in
+/// `exec_errno`, as Python's Popen raises OSError in the parent.
 pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp: common.proc.Envp, faults: atomic.Faults, step: []const u8) RunError!u8 {
     faults.reach(step);
     if (fsx.statAt(fsx.cwd, "/proc/self/stat", true)) |_| {} else |_| return error.Refused;
@@ -86,8 +107,16 @@ pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp:
         _ = linux.sigaction(s, &old[i], null);
     };
 
+    // The child reports a failed execve through a close-on-exec pipe; a
+    // successful exec closes it and the read sees end of file.
+    var report: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&report, .{ .CLOEXEC = true })) != .SUCCESS) return error.CannotStart;
     const fork_rc = linux.fork();
-    if (linux.errno(fork_rc) != .SUCCESS) return error.CannotStart;
+    if (linux.errno(fork_rc) != .SUCCESS) {
+        _ = linux.close(report[0]);
+        _ = linux.close(report[1]);
+        return error.CannotStart;
+    }
     if (fork_rc == 0) {
         _ = linux.setsid();
         const empty = linux.sigemptyset();
@@ -98,11 +127,30 @@ pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp:
             _ = linux.sigaction(@fromBackingInt(@intCast(s)), &dfl, null);
         }
         _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);
-        _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
-        _ = linux.execve(zexe.ptr, zargv.ptr, envp);
+        // Close every inherited descriptor but the report pipe, which
+        // execve closes.
+        const w: linux.fd_t = report[1];
+        if (w > 3) _ = linux.close_range(3, w - 1, .{ .UNSHARE = false, .CLOEXEC = false });
+        _ = linux.close_range(w + 1, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
+        const exec_rc = linux.execve(zexe.ptr, zargv.ptr, envp);
+        const code: u32 = @intFromEnum(linux.errno(exec_rc));
+        _ = linux.write(report[1], std.mem.asBytes(&code), @sizeOf(u32));
         linux.exit_group(127);
     }
     const pid: linux.pid_t = @intCast(fork_rc);
+    _ = linux.close(report[1]);
+    var code: u32 = 0;
+    const got = while (true) {
+        const rc = linux.read(report[0], std.mem.asBytes(&code), @sizeOf(u32));
+        if (linux.errno(rc) != .INTR) break rc;
+    };
+    _ = linux.close(report[0]);
+    if (linux.errno(got) == .SUCCESS and got == @sizeOf(u32)) {
+        var status: i32 = 0;
+        while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
+        exec_errno = @enumFromInt(code);
+        return error.ExecFailed;
+    }
     while (interrupted.load(.seq_cst) == 0) {
         if (exited(pid)) break;
         sleepMs(20);
@@ -133,4 +181,17 @@ test "runCommand returns the exit code and stops the group" {
     try std.testing.expectEqual(@as(u8, 3), try runCommand(a, "/bin/sh", &.{ "sh", "-c", "exit 3" }, envp, .{}, "build"));
     // A background worker left in the group is killed before the return.
     try std.testing.expectEqual(@as(u8, 0), try runCommand(a, "/bin/sh", &.{ "sh", "-c", "sleep 30 & exit 0" }, envp, .{}, "build"));
+}
+
+test "runCommand reports a command that cannot be executed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const envp: common.proc.Envp = &[_:null]?[*:0]const u8{};
+    try std.testing.expectError(error.ExecFailed, runCommand(a, "/nonexistent/prepare", &.{"/nonexistent/prepare"}, envp, .{}, "prepare.invoke"));
+    try std.testing.expectEqual(linux.E.NOENT, exec_errno);
+    try std.testing.expectEqualStrings("No such file or directory", strerror(exec_errno));
+    // A directory is not executable.
+    try std.testing.expectError(error.ExecFailed, runCommand(a, "/", &.{"/"}, envp, .{}, "prepare.invoke"));
+    try std.testing.expectEqual(linux.E.ACCES, exec_errno);
 }

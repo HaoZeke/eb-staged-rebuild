@@ -351,6 +351,7 @@ fn build(r: *R) E!u8 {
     const rc = builders.runCommand(a, exe, cmd.items, envp, r.faults(), "build.invoke") catch |err| switch (err) {
         error.Refused => return r.refuse("external commands require /proc to confirm their process group stopped", .{}),
         error.CannotStart => return r.refuse("could not start {s}", .{cmd.items[0]}),
+        error.ExecFailed => return r.refuse("[Errno {d}] {s}: '{s}'", .{ @intFromEnum(builders.exec_errno), builders.strerror(builders.exec_errno), cmd.items[0] }),
     };
     r.faults().reach("build.finish");
     r.set("eb_returncode", .{ .int = rc });
@@ -918,8 +919,11 @@ fn preparePublication(r: *R) E!u8 {
     }) };
     try write(r, context_path, try std.fmt.allocPrint(a, "{s}\n", .{try json.dumps(a, context, 2, true)}), "prepare.context", null, r.faults());
     log("preparing publication permissions: {s} {s}", .{ exe, context_path });
-    const rc = builders.runCommand(a, exe, &.{ exe, context_path }, r.env.envp, r.faults(), "prepare.invoke") catch
-        return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno 2] No such file or directory: '{s}'", .{exe}), 2);
+    const rc = builders.runCommand(a, exe, &.{ exe, context_path }, r.env.envp, r.faults(), "prepare.invoke") catch |err| {
+        if (err == error.Refused) return r.refuse("external commands require /proc to confirm their process group stopped", .{});
+        const e: linux.E = if (err == error.ExecFailed) builders.exec_errno else .NOENT;
+        return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno {d}] {s}: '{s}'", .{ @intFromEnum(e), builders.strerror(e), exe }), 2);
+    };
     r.set("prepare_returncode", .{ .int = rc });
     if (rc != 0) return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation exited {d}; the live directory was not swapped", .{rc}), rc);
     for (r.list("modules_plan")) |m| {

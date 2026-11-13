@@ -795,7 +795,7 @@ fn runBuild(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config_raw: Py, metad
     } else {
         const rc = builders.runCommand(a, exe.?, command, env.envp, ctx.faults(), "build_events.command") catch |err| switch (err) {
             error.Refused => return refuse(a, "run_build requires /proc to confirm the command's process group stopped", .{}),
-            error.CannotStart => @as(u8, 127),
+            error.CannotStart, error.ExecFailed => @as(u8, 127),
         };
         status = dict(a, &.{ .{ .key = "outcome", .value = Py.s("exited") }, .{ .key = "exit_status", .value = .{ .int = rc } } });
     }
