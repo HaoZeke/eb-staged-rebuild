@@ -19,6 +19,11 @@ from eb_staged_rebuild.probe import (
 )
 
 
+# TOOL_BIN runs the command-line tests against another build of the tool;
+# unset, they run this package with this interpreter.
+CLI = [os.environ["TOOL_BIN"]] if os.environ.get("TOOL_BIN") else [sys.executable, "-m", "eb_staged_rebuild"]
+
+
 def _write(path, text):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -99,9 +104,7 @@ class CliTests(unittest.TestCase):
             )
             env = dict(os.environ)
             cmd = [
-                sys.executable,
-                "-m",
-                "eb_staged_rebuild",
+                *CLI,
                 "run",
                 "--software",
                 software,
@@ -126,7 +129,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("v0\n", _read(os.path.join(install, "PAYLOAD")))
 
             probe = subprocess.run(
-                [sys.executable, "-m", "eb_staged_rebuild", "probe", "--path", root, "--json", "--eb", "missing-eb"],
+                [*CLI, "probe", "--path", root, "--json", "--eb", "missing-eb"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -137,7 +140,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(report["flock"]["cross_node"], "unmeasured")
 
             resolved = subprocess.run(
-                [sys.executable, "-m", "eb_staged_rebuild", "resolve", module_file],
+                [*CLI, "resolve", module_file],
                 env=env,
                 capture_output=True,
                 text=True,
