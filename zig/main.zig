@@ -763,6 +763,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 }
 
 test {
+    _ = @import("swap.zig");
     _ = admin;
     _ = engine;
     _ = modulefile;
