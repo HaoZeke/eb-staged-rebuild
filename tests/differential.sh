@@ -96,6 +96,10 @@ compare "probe --path without a value" probe --path
 compare "top level, nothing"
 compare "top level --help" --help
 compare "--version" --version
+for c in run resume rollback status gc retire; do compare "${c} -h" "${c}" -h; done
+# The version the binary reports is the one build.zig.zon declares.
+zon_version=$(sed -nE 's/^ *\.version = "([^"]+)".*/\1/p' "${repo_root}/build.zig.zon")
+if "${TOOL_BIN}" --version | grep -qF -- "${zon_version}"; then echo "same version as build.zig.zon"; else echo "DIFF version: build.zig.zon says ${zon_version}"; diffs=$((diffs + 1)); fi
 compare "unknown command" bogus
 
 # Commands that change a fixture: each implementation gets its own copy,
@@ -133,6 +137,23 @@ fixture() {
         printf '{"operation": "%s", "actor": "ci", "stack": "s", "module": "demo/1", "location": "%s/software/demo/1", "target": {"cpu": "x86_64/generic"}, "easyconfig": {"path": "%s/bev/demo-1.eb"}}\n' "${op}" "${root}" "${root}" > "${root}/bev/${op}.json"
     done
     printf '{"operation": "bad op", "actor": "ci"}\n' > "${root}/bev/bad.json"
+    # Refusal fixtures: a symlinked rebuild target, a symlinked state root,
+    # a symlinked module file, a module file without a root assignment, and
+    # a second module whose root names a hidden tree through a symlink.
+    mkdir -p "${root}/software/real/1/easybuild" "${root}/software/link" "${root}/modules/all/link"
+    ln -s ../real/1 "${root}/software/link/1"
+    printf 'local root = "software/link/1"\n' > "${root}/modules/all/link/1.lua"
+    ln -s state "${root}/statelink"
+    ln -s 1.lua "${root}/modules/all/demo/symlink.lua"
+    printf 'whatis("no root")\n' > "${root}/modules/all/demo/noroot.lua"
+    mkdir -p "${root}/software/kept/.3.0001" "${root}/software/kept/3" "${root}/modules/all/kept" "${root}/state/runs/r9"
+    ln -s .3.0001 "${root}/software/kept/alias"
+    printf 'local root = "%s/software/kept/alias"\n' "${root}" > "${root}/modules/all/kept/3.lua"
+    printf '{"schema": 2, "run_id": "r9", "state": "complete", "backend": "bwrap", "modules_plan": [{"rel": "kept/3", "status": "published", "live_software": "%s/software/kept/3", "retired": "%s/software/kept/.3.0001", "published_at": 1000.5}]}\n' "${root}" "${root}" > "${root}/state/runs/r9/journal.json"
+    # Publication policies for --prepare.
+    printf '#!/bin/sh\nexit 42\n' > "${root}/prepare-fails"
+    printf '#!/bin/sh\ncount=0\n[ -f "%s/prepare-count" ] && count=$(cat "%s/prepare-count")\necho $((count + 1)) > "%s/prepare-count"\nexit 0\n' "${root}" "${root}" "${root}" > "${root}/prepare-ok"
+    chmod +x "${root}/prepare-fails" "${root}/prepare-ok"
 }
 compare_admin() {
     local label=$1; shift
@@ -147,7 +168,8 @@ compare_admin() {
         local bev=0
         for a in "$@"; do [ "${a}" = build-events ] && bev=1; done
         if [ "${bev}" = 1 ] && [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild.build_events); fi
-        rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | head -1)
+        # The newest retire record; names sort by time.
+        rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | tail -1)
         for a in "$@"; do
             if [ "${a}" = build-events ] && [ "${impl}" = py ]; then continue; fi
             a="${a//@ROOT@/${root}}"
@@ -223,6 +245,33 @@ compare_admin "build-events, deliver then run" build-events --config @ROOT@/bev/
 compare_admin "build-events, bad metadata" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/bad.json -- true
 compare_admin "build-events, both deliver and command" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json --deliver -- true
 compare_admin "run, eb fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb /bin/false --run-id r3 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "gc, retire, gc and keeps" gc --state-root @ROOT@/state --dry-run
+compare_admin "retire --dry-run, a directory" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo --dry-run
+compare_admin "retire, a directory" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo
+compare_admin "retire, a symlinked module file" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/symlink.lua
+compare_admin "retire, no root assignment" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/noroot.lua
+compare_admin "resume a retire record" resume --state-root @ROOT@/state @RETIRE@
+compare_admin "retire after a rollback" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua
+for impl in py zig; do printf 'local root = "software/demo/1"\n-- rewritten\n' > "${work}/${impl}/modules/all/demo/1.lua"; done
+compare_admin "rollback over a new module file" rollback --state-root @ROOT@/state @RETIRE@
+for impl in py zig; do rm "${work}/${impl}/modules/all/demo/1.lua"; done
+compare_admin "rollback after the new file is gone" rollback --state-root @ROOT@/state @RETIRE@
+compare_admin "gc after the retire is rolled back" gc --state-root @ROOT@/state --grace-hours 0
+if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+    shm=$(mktemp -d /dev/shm/esr-diff.XXXXXX)
+    compare_admin "retire, state root on another filesystem" retire --state-root "${shm}/state" --module-file @ROOT@/modules/all/link/1.lua
+    rm -rf -- "${shm}"
+fi
+compare_admin "run, no installed target" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r10 --skip-live-check --module nope/1 -- nope-1.eb
+compare_admin "run, symlinked target" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r10 --skip-live-check --module link/1 -- demo-1.eb
+compare_admin "run, module escapes" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r10 --skip-live-check --module ../outside/1 -- demo-1.eb
+compare_admin "run, symlinked state root" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/statelink --backend installpath --eb @ROOT@/eb --run-id r10 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, missing prepare" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r11 --skip-live-check --prepare @ROOT@/no-such-policy --module demo/1 -- demo-1.eb
+compare_admin "run, prepare fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r12 --skip-live-check --prepare @ROOT@/prepare-fails --module demo/1 -- demo-1.eb
+for impl in py zig; do cp "${work}/${impl}/prepare-ok" "${work}/${impl}/prepare-fails"; done
+compare_admin "resume after the prepare is fixed" resume --state-root @ROOT@/state r12
+compare_admin "the prepare ran once" cat @ROOT@/prepare-count
+compare_admin "rollback a prepared run" rollback --state-root @ROOT@/state r12
 unset NORM_HASH
 
 # The live-tree snapshot a journal records, compared as JSON.
