@@ -78,3 +78,9 @@ jobs:
       - run: shellcheck -S warning tests/differential.sh
       - name: read-only commands against the Python tool
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" bash tests/differential.sh
+      - name: ledger CLI
+        uses: ./.github/actions/pinned-ledger
+      - name: ledger-maintenance against the Python tool
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/differential_ledger.py
+      - name: ledger-maintenance command-line test against the binary
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_maintenance.CommandLineTests

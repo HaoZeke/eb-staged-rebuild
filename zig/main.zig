@@ -10,6 +10,7 @@ const common = @import("zig_common");
 const modulefile = @import("modulefile.zig");
 const pyfmt = @import("pyfmt.zig");
 const probe = @import("probe.zig");
+const ledger = @import("ledger.zig");
 const admin = @import("admin.zig");
 const engine = @import("engine.zig");
 
@@ -761,6 +762,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (std.mem.eql(u8, cmd, "resolve")) return cmdResolve(a, rest);
     if (std.mem.eql(u8, cmd, "status")) return cmdStatus(a, rest);
     if (std.mem.eql(u8, cmd, "probe")) return cmdProbe(a, rest, env);
+    if (std.mem.eql(u8, cmd, "ledger-maintenance")) return ledger.main(a, rest, .{ .envp = env.envp });
     if (std.mem.eql(u8, cmd, "retire")) return cmdRetire(a, rest, env);
     if (std.mem.eql(u8, cmd, "rollback")) return cmdRollback(a, rest, env);
     if (std.mem.eql(u8, cmd, "gc")) return cmdGc(a, rest, env);
@@ -775,6 +777,7 @@ test {
     _ = @import("discover.zig");
     _ = admin;
     _ = engine;
+    _ = ledger;
     _ = modulefile;
     _ = pyfmt;
     _ = probe;

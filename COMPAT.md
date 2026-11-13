@@ -2,7 +2,7 @@
 
 The Zig build in `zig/` is being ported command by command, in the order the
 port plan sets. In this build: `probe`, `status`, `resolve`, `retire`, `gc`,
-and `rollback` of a retire journal; `run --dry-run`. Still to come: the ledger maintenance entry point; then `run`,
+and `rollback` of a retire journal; `run --dry-run`; the ledger maintenance entry point as `ledger-maintenance`. Still to come: `run`,
 `resume` and `rollback` of a run journal, which publishes through the ledger
 outbox as `run` does. A command not yet ported exits 2 with
 `eb-staged-rebuild: COMMAND is not in this build yet`. The Python tool stays
@@ -27,3 +27,10 @@ timestamps normalized.
 | `--lock-timeout` and `--grace-hours` | Python `float()`, which also takes underscores and non-ASCII digits | ASCII decimal and exponent forms |
 | a lock wait longer than about 49 days | waits that long | capped at 2^32 ms |
 | the user-namespace probe | `unshare ... python3 -m eb_staged_rebuild.userns_sandbox --probe` | `unshare ... <this binary> __userns-sandbox --probe` |
+| the ledger maintenance entry point | `python -m eb_staged_rebuild.ledger_maintenance` | `eb-staged-rebuild ledger-maintenance`, the same four subcommands and options, exit codes 0, 2 and 75 |
+| ledger, head or manifest text that is not valid JSON | `... is not JSON: ` and the JSON decoder's message | the same start, then the reason and the character offset |
+| `\d` in timestamps, receipts and anchor names | any Unicode decimal digit | ASCII digits only |
+| a manifest string with an unpaired `\uD800`-`\uDFFF` escape | accepted, and escaped again in the appended record | refused: `manifest FIELD holds an unpaired surrogate escape` |
+| an integer in a head, record or manifest beyond 64 bits | accepted | refused: `... holds the integer N, which is out of range` |
+| an operating-system error with no fixed text in the Zig build | `[Errno N] strerror: 'PATH'` | `ErrorName: 'PATH'` (`[Errno N] ...` for ENOENT, EACCES, EISDIR, ENOTDIR, ELOOP, EEXIST, ENOSPC, EROFS) |
+| `ledger-maintenance SUBCOMMAND --help` | argparse's option help | a short list of the options and which are required |
