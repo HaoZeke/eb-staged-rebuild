@@ -3,13 +3,13 @@
 ```{image} _static/logo-light.svg
 :alt: eb-staged-rebuild
 :width: 420px
-:class: only-light
+:class: light-only
 ```
 
 ```{image} _static/logo-dark.svg
 :alt: eb-staged-rebuild
 :width: 420px
-:class: only-dark
+:class: dark-only
 ```
 
 eb-staged-rebuild rebuilds an existing EasyBuild installation in a versioned generation directory, then exchanges that complete tree with the stable `software/<name>/<version>` directory and publishes the module file with a same-directory replace. The previous tree stays on disk as `software/<name>/.<version>.<run-id>`.
