@@ -30,33 +30,11 @@ fn nowMs() i64 {
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
-/// True while any process in group `pgid` is alive (not a zombie).
-fn groupRunning(a: Allocator, pgid: linux.pid_t) bool {
-    const fd = fsx.openDir(fsx.cwd, "/proc", true) catch return false;
-    defer sys.close(fd);
-    var it = fsx.DirIter.init(a, fd) catch return false;
-    defer it.deinit(a);
-    while (it.next() catch null) |e| {
-        _ = std.fmt.parseInt(u32, e.name, 10) catch continue;
-        var pb: [64]u8 = undefined;
-        const p = std.mem.print(&pb, "/proc/{s}/stat", .{e.name}) catch continue;
-        const f = fsx.openRegular(fsx.cwd, p, true) catch continue;
-        defer sys.close(f.fd);
-        var buf: [1024]u8 = undefined;
-        const n = sys.read(f.fd, &buf) catch continue;
-        const close = std.mem.findScalarLast(u8, buf[0..n], ')') orelse continue;
-        var fields = std.mem.tokenizeAny(u8, buf[close + 1 .. n], " \n");
-        const state = fields.next() orelse continue;
-        _ = fields.next(); // ppid
-        const pg = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch continue;
-        if (pg == pgid and !std.mem.eql(u8, state, "Z") and !std.mem.eql(u8, state, "X")) return true;
-    }
-    return false;
-}
-
-fn killGroup(a: Allocator, pgid: linux.pid_t) void {
+/// _kill_group: SIGKILL the group and wait, with no limit, until no member
+/// is alive, as a member keeps its descriptors until it exits.
+fn killGroup(pgid: linux.pid_t) void {
     _ = linux.kill(-pgid, .KILL);
-    while (groupRunning(a, pgid)) sleepMs(10);
+    while (common.proc.groupAlive(pgid)) sleepMs(10);
 }
 
 fn exited(pid: linux.pid_t) bool {
@@ -158,7 +136,7 @@ pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp:
         const deadline = nowMs() + 2000;
         while (nowMs() < deadline) sleepMs(20);
     }
-    killGroup(a, pid);
+    killGroup(pid);
     var status: i32 = 0;
     while (true) {
         const rc = linux.wait4(pid, &status, 0, null);
