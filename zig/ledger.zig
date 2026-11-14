@@ -78,7 +78,7 @@ pub fn lastMessage() []const u8 {
 /// Python's text of an OSError on `path`.
 fn osError(a: Allocator, err: anyerror, path: []const u8) []const u8 {
     const text = if (common.sys.asError(err)) |e| common.sys.describe(e) else @errorName(err);
-    return std.fmt.allocPrint(a, "{s}: {s}", .{ text, repr(a, path) }) catch path;
+    return a.print("{s}: {s}", .{ text, repr(a, path) }) catch path;
 }
 
 fn osFail(a: Allocator, err: anyerror, path: []const u8) Fail {
@@ -575,7 +575,7 @@ fn hasSurrogate(s: []const u8) bool {
 fn sha256Hex(a: Allocator, data: []const u8) Allocator.Error![]u8 {
     var d: [32]u8 = undefined;
     Sha256.hash(data, &d, .{});
-    return std.fmt.allocPrint(a, "{x}", .{&d});
+    return a.print("{x}", .{&d});
 }
 
 fn contains(list: []const []const u8, s: []const u8) bool {
@@ -611,7 +611,7 @@ pub fn utc(a: Allocator, seconds: i64) Allocator.Error![]u8 {
     const days = @divFloor(seconds, 86400);
     const rem = seconds - days * 86400;
     const c = civilFromDays(days);
-    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    return a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         @as(u64, @intCast(c.y)),                  @as(u64, @intCast(c.m)),                          @as(u64, @intCast(c.d)),
         @as(u64, @intCast(@divFloor(rem, 3600))), @as(u64, @intCast(@mod(@divFloor(rem, 60), 60))), @as(u64, @intCast(@mod(rem, 60))),
     });
@@ -669,7 +669,7 @@ fn realpathLoose(a: Allocator, path: []const u8) Allocator.Error![]const u8 {
             return std.mem.concat(a, u8, &.{ r, rest });
         } else |_| {}
         if (end == 0) return path;
-        end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
+        end = std.mem.findScalarLast(u8, path[0..end], '/') orelse 0;
     }
 }
 
@@ -705,7 +705,7 @@ fn isDirNoFollow(path: []const u8) bool {
 }
 
 fn dirname(path: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
+    const i = std.mem.findScalarLast(u8, path, '/') orelse return "";
     return if (i == 0) "/" else path[0..i];
 }
 
@@ -804,7 +804,7 @@ fn mkdtemp(a: Allocator, dir: []const u8, prefix: []const u8) Fail![]const u8 {
         var name: [8]u8 = undefined;
         const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_";
         for (&name, 0..) |*c, i| c.* = alphabet[(if (i < 6) rnd[i] else rnd[i - 6] >> 3) % alphabet.len];
-        const path = try std.fmt.allocPrint(a, "{s}/{s}{s}", .{ dir, prefix, name });
+        const path = try a.print("{s}/{s}{s}", .{ dir, prefix, name });
         var zb: [sys.path_max:0]u8 = undefined;
         const zp = sys.z(&zb, path) catch |err| return osFail(a, err, path);
         _ = sys.call(linux.mkdirat, .{ fsx.cwd, zp.ptr, @as(linux.mode_t, 0o700) }) catch |err| switch (err) {
@@ -893,8 +893,8 @@ fn replaceInvalid(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
 
 /// str(float) as Python prints a command-line timeout.
 fn pyFloat(a: Allocator, f: f64) []const u8 {
-    if (f == @floor(f) and @abs(f) < 1e16) return std.fmt.allocPrint(a, "{d}.0", .{@as(i64, @intFromFloat(f))}) catch "?";
-    return std.fmt.allocPrint(a, "{d}", .{f}) catch "?";
+    if (f == @floor(f) and @abs(f) < 1e16) return a.print("{d}.0", .{@as(i64, @intFromFloat(f))}) catch "?";
+    return a.print("{d}", .{f}) catch "?";
 }
 
 /// The last `n` characters of `s` (Python slicing by code point).
@@ -942,7 +942,7 @@ fn tileLine(s: []const u8) ?struct { size: []const u8, root: []const u8 } {
     const p2 = " extends the head and holds the same lines";
     if (!std.mem.startsWith(u8, s, p1) or !std.mem.endsWith(u8, s, p2)) return null;
     const mid = s[p1.len .. s.len - p2.len];
-    const sp = std.mem.indexOf(u8, mid, " root ") orelse return null;
+    const sp = std.mem.find(u8, mid, " root ") orelse return null;
     const size = mid[0..sp];
     const root = mid[sp + 6 ..];
     if (size.len == 0 or !digits(size) or !isHex(root, 64)) return null;
@@ -953,12 +953,12 @@ fn tileLine(s: []const u8) ?struct { size: []const u8, root: []const u8 } {
 fn checkpointLine(s: []const u8) ?struct { size: []const u8, root: []const u8 } {
     if (!std.mem.startsWith(u8, s, "checkpoint ")) return null;
     const rest = s["checkpoint ".len..];
-    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const sp = std.mem.findScalar(u8, rest, ' ') orelse return null;
     if (sp == 0 or hasSpace(rest[0..sp])) return null;
     const after = rest[sp..];
     if (!std.mem.startsWith(u8, after, " size ")) return null;
     const r2 = after[6..];
-    const rs = std.mem.indexOf(u8, r2, " root ") orelse return null;
+    const rs = std.mem.find(u8, r2, " root ") orelse return null;
     const size = r2[0..rs];
     if (size.len == 0 or !digits(size)) return null;
     const r3 = r2[rs + 6 ..];
@@ -972,10 +972,10 @@ fn checkpointLine(s: []const u8) ?struct { size: []const u8, root: []const u8 } 
 fn indexCheckpointLine(s: []const u8) bool {
     if (!std.mem.startsWith(u8, s, "index checkpoint ")) return false;
     const rest = s["index checkpoint ".len..];
-    const sp = std.mem.indexOf(u8, rest, "/index size ") orelse return false;
+    const sp = std.mem.find(u8, rest, "/index size ") orelse return false;
     if (sp == 0 or hasSpace(rest[0..sp])) return false;
     const r2 = rest[sp + "/index size ".len ..];
-    const rs = std.mem.indexOf(u8, r2, " root ") orelse return false;
+    const rs = std.mem.find(u8, r2, " root ") orelse return false;
     if (rs == 0 or !digits(r2[0..rs])) return false;
     const r3 = r2[rs + 6 ..];
     return r3.len > 68 and isHex(r3[0..64], 64) and std.mem.startsWith(u8, r3[64..], " to ");
@@ -1027,7 +1027,7 @@ fn pyRepr(a: Allocator, v: V) []const u8 {
         .str => |s| repr(a, s),
         .null => "None",
         .bool => |b| if (b) "True" else "False",
-        .int => |n| std.fmt.allocPrint(a, "{d}", .{n}) catch "?",
+        .int => |n| a.print("{d}", .{n}) catch "?",
         else => canonical(a, v) catch "?",
     };
 }
@@ -1073,7 +1073,7 @@ pub fn parseLog(a: Allocator, data: []const u8, what: []const u8) Fail![]const R
     var it = std.mem.splitScalar(u8, text[0 .. text.len - 1], '\n');
     var index: usize = 0;
     while (it.next()) |line| : (index += 1) {
-        const lwhat = try std.fmt.allocPrint(a, "{s} line {d}", .{ what, index });
+        const lwhat = try a.print("{s} line {d}", .{ what, index });
         const rec = try strictJson(a, line, lwhat);
         if (rec != .obj) return refuse("{s} line {d} is not a JSON object", .{ what, index });
         try checkRecord(a, rec, index, if (records.items.len > 0) records.items[0].stack else null);
@@ -1092,7 +1092,7 @@ pub fn parseLog(a: Allocator, data: []const u8, what: []const u8) Fail![]const R
 
 /// The bytes up to the last newline: a concurrent append may be mid-line.
 fn committedPrefix(data: []const u8) []const u8 {
-    const end = std.mem.lastIndexOfScalar(u8, data, '\n') orelse return "";
+    const end = std.mem.findScalarLast(u8, data, '\n') orelse return "";
     return data[0 .. end + 1];
 }
 
@@ -1116,7 +1116,7 @@ const Verifier = struct {
         if (size == 0) {
             good = lines.len == 1 and std.mem.eql(u8, lines[0], expected);
         } else {
-            const want_size = try std.fmt.allocPrint(a, "{d}", .{size});
+            const want_size = try a.print("{d}", .{size});
             const tl = if (lines.len == 2) tileLine(rstripNl(lines[1])) else null;
             good = lines.len >= 1 and std.mem.eql(u8, lines[0], expected) and tl != null and
                 std.mem.eql(u8, tl.?.size, want_size) and std.mem.eql(u8, tl.?.root, root);
@@ -1135,12 +1135,12 @@ const Verifier = struct {
         const a = v.a;
         if (head.size > records.len) return fail(error.Verification, "head covers {d} records but the ledger has {d}", .{ head.size, records.len });
         if (head.size == 0) {
-            const exp = try std.fmt.allocPrint(a, "the head of size 0 root {s} extends the head of size 0 root {s}\n", .{ head.root, head.root });
+            const exp = try a.print("the head of size 0 root {s} extends the head of size 0 root {s}\n", .{ head.root, head.root });
             return v.run(&.{ "--log", log, "--public-key", v.public_key, "--from", head_path, "--to", head_path }, exp, head.size, head.root);
         }
         const last: usize = @intCast(head.size - 1);
-        const exp = try std.fmt.allocPrint(a, "record {d} id {s} is in the head of size {d} root {s}\n", .{ last, records[last].id, head.size, head.root });
-        const last_s = try std.fmt.allocPrint(a, "{d}", .{last});
+        const exp = try a.print("record {d} id {s} is in the head of size {d} root {s}\n", .{ last, records[last].id, head.size, head.root });
+        const last_s = try a.print("{d}", .{last});
         return v.run(&.{ "--log", log, "--public-key", v.public_key, "--record", last_s, "--head", head_path }, exp, head.size, head.root);
     }
 
@@ -1150,7 +1150,7 @@ const Verifier = struct {
             return fail(error.Equivocation, "two signed heads of size {d} have roots {s} and {s}", .{ older.size, older.root, newer.root });
         if (older.size > newer.size)
             return fail(error.Equivocation, "the head of size {d} is older than an anchored head of size {d}", .{ newer.size, older.size });
-        const exp = try std.fmt.allocPrint(a, "the head of size {d} root {s} extends the head of size {d} root {s}\n", .{ newer.size, newer.root, older.size, older.root });
+        const exp = try a.print("the head of size {d} root {s} extends the head of size {d} root {s}\n", .{ newer.size, newer.root, older.size, older.root });
         v.run(&.{ "--log", log, "--public-key", v.public_key, "--from", older_path, "--to", newer_path }, exp, newer.size, newer.root) catch |err| switch (err) {
             error.Verification => {
                 const inner = try a.dupe(u8, why.items);
@@ -1173,8 +1173,8 @@ fn readVerified(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, h
     try distinctFiles(&.{ .{ .what = "ledger", .path = log }, .{ .what = "head", .path = head }, .{ .what = "public key", .path = public_key } });
     const log_bytes = try readRegular(a, log, "ledger");
     const head_bytes = try readRegular(a, head, "head");
-    const signed = try parseHead(a, head_bytes, try std.fmt.allocPrint(a, "head {s}", .{head}));
-    const records = try parseLog(a, log_bytes, try std.fmt.allocPrint(a, "ledger {s}", .{log}));
+    const signed = try parseHead(a, head_bytes, try a.print("head {s}", .{head}));
+    const records = try parseLog(a, log_bytes, try a.print("ledger {s}", .{log}));
     if (signed.size > records.len)
         return fail(error.Verification, "head {s} covers {d} records but ledger {s} has {d}", .{ head, signed.size, log, records.len });
     if (signed.size < records.len)
@@ -1230,7 +1230,7 @@ pub fn loadManifest(a: Allocator, path: []const u8, expected_sha256: []const u8,
     const digest = try sha256Hex(a, data);
     if (!std.mem.eql(u8, digest, expected_sha256)) return refuse("manifest {s} hashes to {s}, not the pinned {s}", .{ path, digest, expected_sha256 });
     const text = try utf8(a, data, "manifest {s}", .{path});
-    const manifest = try strictJson(a, text, try std.fmt.allocPrint(a, "manifest {s}", .{path}));
+    const manifest = try strictJson(a, text, try a.print("manifest {s}", .{path}));
     _ = try only(a, manifest, &.{ "schema", "manifest_id", "observed_at", "observer", "stack", "target", "observations" }, "");
     const schema = V.str_(manifest.get("schema")) orelse "";
     if (!std.mem.eql(u8, schema, MANIFEST_SCHEMA) or manifest.get("schema").? != .str) return refuse("manifest schema must be " ++ MANIFEST_SCHEMA, .{});
@@ -1245,27 +1245,27 @@ pub fn loadManifest(a: Allocator, path: []const u8, expected_sha256: []const u8,
     if (obs == null or obs.? != .arr or obs.?.arr.len == 0) return refuse("manifest observations must be a non-empty list", .{});
     var seen: std.ArrayList([2][]const u8) = .empty;
     for (obs.?.arr, 0..) |item, number| {
-        const where = try std.fmt.allocPrint(a, "observations[{d}]", .{number});
+        const where = try a.print("observations[{d}]", .{number});
         _ = try only(a, item, &.{ "module", "location", "modulefile", "provenance", "note" }, where);
-        const module = try text_(a, item.get("module"), try std.fmt.allocPrint(a, "{s}.module", .{where}), false);
-        const location = try text_(a, item.get("location"), try std.fmt.allocPrint(a, "{s}.location", .{where}), true);
+        const module = try text_(a, item.get("module"), try a.print("{s}.module", .{where}), false);
+        const location = try text_(a, item.get("location"), try a.print("{s}.location", .{where}), true);
         for (seen.items) |p| if (std.mem.eql(u8, p[0], module) and std.mem.eql(u8, p[1], location))
             return refuse("manifest {s} repeats {s} at {s}", .{ where, module, location });
         try seen.append(a, .{ module, location });
-        if (item.get("note")) |n| _ = try text_(a, n, try std.fmt.allocPrint(a, "{s}.note", .{where}), false);
+        if (item.get("note")) |n| _ = try text_(a, n, try a.print("{s}.note", .{where}), false);
         if (item.get("modulefile")) |mf| {
-            const mw = try std.fmt.allocPrint(a, "{s}.modulefile", .{where});
+            const mw = try a.print("{s}.modulefile", .{where});
             _ = try only(a, mf, &.{ "path", "sha256" }, mw);
-            _ = try text_(a, mf.get("path"), try std.fmt.allocPrint(a, "{s}.path", .{mw}), true);
+            _ = try text_(a, mf.get("path"), try a.print("{s}.path", .{mw}), true);
             if (!hex64(mf.get("sha256"))) return refuse("manifest {s}.sha256 must be 64 lower-case hex characters", .{mw});
         }
         const prov = item.get("provenance");
         if (prov == null or prov.? != .arr or prov.?.arr.len == 0) return refuse("manifest {s}.provenance must name at least one original reference", .{where});
         for (prov.?.arr, 0..) |ref, rn| {
-            const rw = try std.fmt.allocPrint(a, "{s}.provenance[{d}]", .{ where, rn });
+            const rw = try a.print("{s}.provenance[{d}]", .{ where, rn });
             _ = try only(a, ref, &.{ "ref", "kind", "sha256" }, rw);
-            _ = try text_(a, ref.get("ref"), try std.fmt.allocPrint(a, "{s}.ref", .{rw}), false);
-            if (ref.get("kind")) |k| _ = try text_(a, k, try std.fmt.allocPrint(a, "{s}.kind", .{rw}), false);
+            _ = try text_(a, ref.get("ref"), try a.print("{s}.ref", .{rw}), false);
+            if (ref.get("kind")) |k| _ = try text_(a, k, try a.print("{s}.kind", .{rw}), false);
             if (ref.get("sha256")) |h| if (!hex64(h)) return refuse("manifest {s}.sha256 must be 64 lower-case hex characters", .{rw});
         }
     }
@@ -1283,7 +1283,7 @@ pub fn backfillRecords(a: Allocator, m: Manifest) Allocator.Error![]const V {
         const location = item.get("location").?.str;
         const place = (try sha256Hex(a, location))[0..16];
         var build: Obj = .{ .a = a };
-        try build.put("event_id", S(try std.fmt.allocPrint(a, "eb-staged-rebuild/backfill/{s}/{s}@{s}", .{ mid, module, place })));
+        try build.put("event_id", S(try a.print("eb-staged-rebuild/backfill/{s}/{s}@{s}", .{ mid, module, place })));
         try build.put("tool", S(TOOL));
         try build.put("kind", S(BACKFILL_KIND));
         try build.put("manifest_id", S(mid));
@@ -1299,7 +1299,7 @@ pub fn backfillRecords(a: Allocator, m: Manifest) Allocator.Error![]const V {
         try rec.put("module", S(module));
         try rec.put("location", S(location));
         try rec.put("action", S("finding"));
-        try rec.put("reason", S(try std.fmt.allocPrint(a, "observed by backfill manifest {s} at {s}; no history before the observation is recorded", .{ mid, observed })));
+        try rec.put("reason", S(try a.print("observed by backfill manifest {s} at {s}; no history before the observation is recorded", .{ mid, observed })));
         try rec.put("build", build.v());
         if (item.get("modulefile")) |mf| try rec.put("modulefile", mf);
         try records.append(a, rec.v());
@@ -1320,7 +1320,7 @@ fn ledgerAppend(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, k
     if (r.code != 0) return fail(error.Pending, "eb-stack ledger append exited {d}: {s}", .{ r.code, tailChars(pyStripped(r.stderr), 500) });
     const out = pyStripped(r.stdout);
     const first = blk: {
-        const nl = std.mem.indexOfAny(u8, out, "\n\r") orelse break :blk out;
+        const nl = std.mem.findAny(u8, out, "\n\r") orelse break :blk out;
         break :blk out[0..nl];
     };
     const summary = parseSummary(first) orelse return fail(error.Pending, "eb-stack ledger append printed no receipt: {s}", .{repr(a, tailChars(out, 500))});
@@ -1334,7 +1334,7 @@ fn ledgerAppend(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, k
         });
     const logged = try loggedEvent(a, log, @intCast(summary.index));
     if (logged == null or !std.mem.eql(u8, logged.?, event_id)) return fail(error.Pending, "ledger record {d} is not event {s}", .{ summary.index, event_id });
-    const idx_s = try std.fmt.allocPrint(a, "{d}", .{summary.index});
+    const idx_s = try a.print("{d}", .{summary.index});
     const vr = try bounded(a, env, &.{ eb_stack, "ledger", "verify", "--log", log, "--public-key", public_key, "--record", idx_s, "--head", head }, timeout);
     if (vr.code != 0) return fail(error.Pending, "eb-stack ledger verify exited {d}: {s}", .{ vr.code, tailChars(pyStripped(vr.stderr), 500) });
     var o: Obj = .{ .a = a };
@@ -1359,7 +1359,7 @@ fn parseSummary(line: []const u8) ?Summary {
         s = s["already recorded record ".len..];
         replayed = true;
     } else return null;
-    const sp = std.mem.indexOf(u8, s, " id ") orelse return null;
+    const sp = std.mem.find(u8, s, " id ") orelse return null;
     if (sp == 0 or !digits(s[0..sp])) return null;
     const index = std.fmt.parseInt(i64, s[0..sp], 10) catch return null;
     s = s[sp + 4 ..];
@@ -1368,7 +1368,7 @@ fn parseSummary(line: []const u8) ?Summary {
     s = s[64..];
     if (!std.mem.startsWith(u8, s, "; head size ")) return null;
     s = s["; head size ".len..];
-    const rs = std.mem.indexOf(u8, s, " root ") orelse return null;
+    const rs = std.mem.find(u8, s, " root ") orelse return null;
     if (rs == 0 or !digits(s[0..rs])) return null;
     const size = std.fmt.parseInt(i64, s[0..rs], 10) catch return null;
     s = s[rs + 6 ..];
@@ -1420,7 +1420,7 @@ pub fn backfill(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, k
     const mstack = manifest.v.get("stack").?.str;
     // eb-stack quarantines an interrupted tail on the next append.
     const existing: []const Record = if (lexists(log))
-        try parseLog(a, committedPrefix(try readRegular(a, log, "ledger")), try std.fmt.allocPrint(a, "ledger {s}", .{log}))
+        try parseLog(a, committedPrefix(try readRegular(a, log, "ledger")), try a.print("ledger {s}", .{log}))
     else
         &.{};
     if (existing.len > 0 and !std.mem.eql(u8, existing[0].stack, mstack))
@@ -1452,11 +1452,11 @@ pub fn backfill(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, k
     var replayed: usize = 0;
     for (records, 0..) |rec, number| {
         const event_id = rec.get("build").?.get("event_id").?.str;
-        const path = try std.fmt.allocPrint(a, "{s}/{d:0>6}.json", .{ private, number });
+        const path = try a.print("{s}/{d:0>6}.json", .{ private, number });
         var data = try dump(a, rec, .{ .sort = true, .ascii = true, .compact = false });
         data = try std.mem.concat(a, u8, &.{ data, "\n" });
         try writePrivate(a, path, data);
-        try faults.reach(try std.fmt.allocPrint(a, "backfill.append:{s}", .{event_id}));
+        try faults.reach(try a.print("backfill.append:{s}", .{event_id}));
         const receipt = try checkReceipt(a, try ledgerAppend(a, env, eb_stack, log, key, head, public_key, timeout, path, event_id), event_id);
         if (receipt.get("replayed").?.bool) replayed += 1 else appended += 1;
         var r: Obj = .{ .a = a };
@@ -1516,7 +1516,7 @@ fn listAnchors(a: Allocator, anchors: []const u8) Fail![]const Anchor {
         const st = fsx.statAt(fsx.cwd, path, false) catch |err| return osFail(a, err, path);
         if (!st.isReg() or st.nlink != 1) return refuse("anchor {s} must be a regular file with one link", .{path});
         const data = try readRegular(a, path, "anchor");
-        const head = try parseHead(a, data, try std.fmt.allocPrint(a, "anchor {s}", .{path}));
+        const head = try parseHead(a, data, try a.print("anchor {s}", .{path}));
         if (!std.mem.eql(u8, head.ts[0..10], day)) return refuse("anchor {s} holds a head signed at {s}, not on {s}", .{ path, head.ts, day });
         try found.append(a, .{ .day = day, .path = path, .head = head, .bytes = data });
     }
@@ -1596,7 +1596,7 @@ pub fn anchor(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, key
     const signed_bytes = try readRegular(a, candidate, "signed head");
     const signed = try parseHead(a, signed_bytes, "the signed head");
     const lines = try splitKeep(a, r.stdout);
-    const receipt = try std.fmt.allocPrint(a, "signed head size {d} root {s} at {s} to {s}\n", .{ signed.size, signed.root, ts, candidate });
+    const receipt = try a.print("signed head size {d} root {s} at {s} to {s}\n", .{ signed.size, signed.root, ts, candidate });
     var good: bool = undefined;
     if (signed.size == 0) {
         // An empty log has no record to derive a checkpoint origin from;
@@ -1605,14 +1605,14 @@ pub fn anchor(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, key
     } else {
         const cp = if (lines.len == 2 or lines.len == 3) checkpointLine(rstripNl(lines[1])) else null;
         const index_ok = lines.len == 2 or (lines.len == 3 and indexCheckpointLine(rstripNl(lines[2])));
-        const want_size = try std.fmt.allocPrint(a, "{d}", .{signed.size});
+        const want_size = try a.print("{d}", .{signed.size});
         good = lines.len >= 1 and std.mem.eql(u8, lines[0], receipt) and cp != null and index_ok and
             std.mem.eql(u8, cp.?.size, want_size) and std.mem.eql(u8, cp.?.root, signed.root);
     }
     if (!good) return fail(error.Pending, "eb-stack ledger head printed an unexpected receipt: {s}", .{repr(a, tailChars(r.stdout, 500))});
     if (!std.mem.eql(u8, signed.ts, ts)) return fail(error.Pending, "eb-stack ledger head signed at {s}, not {s}", .{ signed.ts, ts });
     const snapshot = committedPrefix(try readRegular(a, log, "ledger"));
-    const records = try parseLog(a, snapshot, try std.fmt.allocPrint(a, "ledger {s}", .{log}));
+    const records = try parseLog(a, snapshot, try a.print("ledger {s}", .{log}));
     const verifier: Verifier = .{ .a = a, .env = env, .eb_stack = eb_stack, .public_key = public_key, .timeout = timeout };
     const private_log = try pin(a, staging, "ledger.jsonl", snapshot);
     try verifier.tiles(private_log);
@@ -1630,7 +1630,7 @@ pub fn anchor(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, key
         try o.put("root", S(t.head.root));
         return o.v();
     }
-    const target = try std.fmt.allocPrint(a, "{s}/{s}.head.json", .{ anchors, day });
+    const target = try a.print("{s}/{s}.head.json", .{ anchors, day });
     {
         const fd = sys.openat(fsx.cwd, candidate, .{ .NOFOLLOW = true }, 0) catch |err| return osFail(a, err, candidate);
         defer sys.close(fd);
@@ -1668,14 +1668,14 @@ pub fn verifyAnchors(a: Allocator, env: Env, eb_stack: []const u8, log: []const 
         return o.v();
     }
     const snapshot = committedPrefix(try readRegular(a, log, "ledger"));
-    const records = try parseLog(a, snapshot, try std.fmt.allocPrint(a, "ledger {s}", .{log}));
+    const records = try parseLog(a, snapshot, try a.print("ledger {s}", .{log}));
     const verifier: Verifier = .{ .a = a, .env = env, .eb_stack = eb_stack, .public_key = public_key, .timeout = timeout };
     const private = try mkdtemp(a, tempRoot(a, env), "eb-ledger-anchors-");
     defer rmtree(a, private);
     const private_log = try pin(a, private, "ledger.jsonl", snapshot);
     try verifier.tiles(private_log);
     const pinned = try a.alloc([]const u8, found.len);
-    for (found, 0..) |item, n| pinned[n] = try pin(a, private, try std.fmt.allocPrint(a, "{d:0>6}.json", .{n}), item.bytes);
+    for (found, 0..) |item, n| pinned[n] = try pin(a, private, try a.print("{d:0>6}.json", .{n}), item.bytes);
     var n: usize = 1;
     while (n < found.len) : (n += 1) try verifier.extends(private_log, pinned[n - 1], found[n - 1].head, pinned[n], found[n].head);
     try verifier.binds(private_log, pinned[found.len - 1], found[found.len - 1].head, records);
@@ -1690,7 +1690,7 @@ pub fn verifyAnchors(a: Allocator, env: Env, eb_stack: []const u8, log: []const 
 // ---- package history projections ---------------------------------------------------
 
 pub fn packageOf(module: []const u8) []const u8 {
-    const i = std.mem.indexOfScalar(u8, module, '/') orelse return module;
+    const i = std.mem.findScalar(u8, module, '/') orelse return module;
     return module[0..i];
 }
 
@@ -1898,7 +1898,7 @@ pub fn buildHistory(a: Allocator, verified: VerifiedLog) Allocator.Error!V {
 fn quote(a: Allocator, s: []const u8, safe: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     for (s) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '-' or c == '~' or std.mem.indexOfScalar(u8, safe, c) != null) {
+        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '-' or c == '~' or std.mem.findScalar(u8, safe, c) != null) {
             try out.append(a, c);
         } else try out.print(a, "%{X:0>2}", .{c});
     }
@@ -1954,34 +1954,34 @@ fn details(a: Allocator, event: V) Allocator.Error![]const u8 {
     std.mem.sort(Mem, sorted, {}, lessKey);
     for (sorted) |m| {
         const idx = m.val.get("index").?;
-        const where = if (idx != .null) try std.fmt.allocPrint(a, "#{d}", .{idx.int}) else try std.fmt.allocPrint(a, "unknown record {s}", .{m.val.get("id").?.str});
-        try parts.append(a, try std.fmt.allocPrint(a, "{s} {s}", .{ m.key, where }));
+        const where = if (idx != .null) try a.print("#{d}", .{idx.int}) else try a.print("unknown record {s}", .{m.val.get("id").?.str});
+        try parts.append(a, try a.print("{s} {s}", .{ m.key, where }));
     }
     for ([_]struct { key: []const u8, label: []const u8 }{ .{ .key = "corrected_by", .label = "corrected by " }, .{ .key = "correction_pending_by", .label = "correction started by " } }) |x| {
         const l = event.get(x.key).?.arr;
         if (l.len == 0) continue;
         var refs: std.ArrayList([]const u8) = .empty;
-        for (l) |n| try refs.append(a, try std.fmt.allocPrint(a, "#{d}", .{n.int}));
+        for (l) |n| try refs.append(a, try a.print("#{d}", .{n.int}));
         try parts.append(a, try std.mem.concat(a, u8, &.{ x.label, try std.mem.join(a, ", ", refs.items) }));
     }
     if (event.get("observed").?.bool) {
         var refs: std.ArrayList([]const u8) = .empty;
         for (event.get("provenance").?.arr) |ref| {
             const r = ref.get("ref").?.str;
-            try refs.append(a, if (ref.get("sha256")) |h| try std.fmt.allocPrint(a, "{s} sha256 {s}", .{ r, h.str }) else r);
+            try refs.append(a, if (ref.get("sha256")) |h| try a.print("{s} sha256 {s}", .{ r, h.str }) else r);
         }
-        try parts.append(a, try std.fmt.allocPrint(a, "observed by manifest {s}; provenance {s}", .{ event.get("manifest_id").?.str, try std.mem.join(a, "; ", refs.items) }));
+        try parts.append(a, try a.print("observed by manifest {s}; provenance {s}", .{ event.get("manifest_id").?.str, try std.mem.join(a, "; ", refs.items) }));
     }
     const reason = event.get("reason").?;
-    if (reason != .null) try parts.append(a, try std.fmt.allocPrint(a, "reason {s}", .{if (reason == .str) reason.str else try canonical(a, reason)}));
+    if (reason != .null) try parts.append(a, try a.print("reason {s}", .{if (reason == .str) reason.str else try canonical(a, reason)}));
     return mdStr(a, try std.mem.join(a, "; ", parts.items));
 }
 
 fn headLines(a: Allocator, model: V, lines: *std.ArrayList([]const u8)) Allocator.Error!void {
     const head = model.get("head").?;
-    try lines.append(a, try std.fmt.allocPrint(a, "Stack: {s}", .{try md(a, model.get("stack").?)}));
+    try lines.append(a, try a.print("Stack: {s}", .{try md(a, model.get("stack").?)}));
     try lines.append(a, "");
-    try lines.append(a, try std.fmt.allocPrint(a, "Verified head: size {d}, root {s}, signed {s} by {s}.", .{
+    try lines.append(a, try a.print("Verified head: size {d}, root {s}, signed {s} by {s}.", .{
         head.get("size").?.int, head.get("root").?.str, head.get("ts").?.str, head.get("public_key").?.str,
     }));
     try lines.append(a, "");
@@ -1989,19 +1989,19 @@ fn headLines(a: Allocator, model: V, lines: *std.ArrayList([]const u8)) Allocato
 
 fn renderPackage(a: Allocator, model: V, package: V) Allocator.Error![]const u8 {
     var lines: std.ArrayList([]const u8) = .empty;
-    try lines.append(a, try std.fmt.allocPrint(a, "# Package history: {s}", .{try md(a, package.get("name").?)}));
+    try lines.append(a, try a.print("# Package history: {s}", .{try md(a, package.get("name").?)}));
     try lines.append(a, "");
     try headLines(a, model, &lines);
     try lines.appendSlice(a, &.{ "## Modules", "", "| Module | State | Last change | Location |", "| --- | --- | --- | --- |" });
     for (package.get("modules").?.arr) |m| {
         const lc = m.get("last_change").?;
-        const change = if (lc != .null) try std.fmt.allocPrint(a, "#{d}", .{lc.int}) else "";
-        try lines.append(a, try std.fmt.allocPrint(a, "| {s} | {s} | {s} | {s} |", .{ try md(a, m.get("module").?), m.get("state").?.str, change, try md(a, m.get("location").?) }));
+        const change = if (lc != .null) try a.print("#{d}", .{lc.int}) else "";
+        try lines.append(a, try a.print("| {s} | {s} | {s} | {s} |", .{ try md(a, m.get("module").?), m.get("state").?.str, change, try md(a, m.get("location").?) }));
     }
     try lines.appendSlice(a, &.{ "", "## Events", "", "| # | Time (UTC) | Action | Stage | Module | Actor | Status | Details |", "| --- | --- | --- | --- | --- | --- | --- | --- |" });
     for (package.get("events").?.arr) |e| {
         const stage = e.get("stage").?;
-        try lines.append(a, try std.fmt.allocPrint(a, "| {d} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |", .{
+        try lines.append(a, try a.print("| {d} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |", .{
             e.get("index").?.int,         try md(a, e.get("ts").?),    e.get("action").?.str, if (stage == .null) "" else stage.str,
             try md(a, e.get("module").?), try md(a, e.get("actor").?), e.get("status").?.str, try details(a, e),
         }));
@@ -2009,7 +2009,7 @@ fn renderPackage(a: Allocator, model: V, package: V) Allocator.Error![]const u8 
     const problems = package.get("problems").?.arr;
     if (problems.len > 0) {
         try lines.appendSlice(a, &.{ "", "## Problems", "" });
-        for (problems) |p| try lines.append(a, try std.fmt.allocPrint(a, "* record #{d} {s} {s}: {s}", .{
+        for (problems) |p| try lines.append(a, try a.print("* record #{d} {s} {s}: {s}", .{
             p.get("index").?.int, p.get("field").?.str, try md(a, p.get("target").?), p.get("problem").?.str,
         }));
     }
@@ -2036,8 +2036,8 @@ fn render(a: Allocator, model: V) Fail![]const File {
         try doc.put("modules", package.get("modules").?);
         try doc.put("events", package.get("events").?);
         try doc.put("problems", package.get("problems").?);
-        const jrel = try std.fmt.allocPrint(a, "packages/{s}.json", .{stem});
-        const mrel = try std.fmt.allocPrint(a, "packages/{s}.md", .{stem});
+        const jrel = try a.print("packages/{s}.json", .{stem});
+        const mrel = try a.print("packages/{s}.md", .{stem});
         try files.append(a, .{ .rel = jrel, .data = try jsonBytes(a, doc.v()) });
         try files.append(a, .{ .rel = mrel, .data = try renderPackage(a, model, package) });
         var entry: Obj = .{ .a = a };
@@ -2061,7 +2061,7 @@ fn render(a: Allocator, model: V) Fail![]const File {
     try lines.appendSlice(a, &.{ "| Package | Modules | Events |", "| --- | --- | --- |" });
     for (index.items) |entry| {
         const link = try quote(a, entry.get("markdown").?.str, "/");
-        try lines.append(a, try std.fmt.allocPrint(a, "| [{s}]({s}) | {d} | {d} |", .{ try md(a, entry.get("name").?), link, entry.get("modules").?.int, entry.get("events").?.int }));
+        try lines.append(a, try a.print("| [{s}]({s}) | {d} | {d} |", .{ try md(a, entry.get("name").?), link, entry.get("modules").?.int, entry.get("events").?.int }));
     }
     try files.append(a, .{ .rel = "index.md", .data = try std.mem.concat(a, u8, &.{ try std.mem.join(a, "\n", lines.items), "\n" }) });
     return files.items;
@@ -2153,7 +2153,7 @@ pub fn project(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, he
     }.lt);
     var keep: std.StringHashMapUnmanaged(void) = .empty;
     for (sorted) |f| if (std.mem.startsWith(u8, f.rel, "packages/")) {
-        try writeAtomic(a, try join(a, out, f.rel), f.data, try std.fmt.allocPrint(a, "projection.{s}", .{f.rel}), faults);
+        try writeAtomic(a, try join(a, out, f.rel), f.data, try a.print("projection.{s}", .{f.rel}), faults);
         try keep.put(a, f.rel["packages/".len..], {});
     };
     for (try listdir(a, packages)) |name| {
@@ -2163,7 +2163,7 @@ pub fn project(a: Allocator, env: Env, eb_stack: []const u8, log: []const u8, he
     }
     try fsyncDir(a, packages);
     for ([_][]const u8{ "index.md", "index.json" }) |rel| {
-        for (files) |f| if (std.mem.eql(u8, f.rel, rel)) try writeAtomic(a, try join(a, out, rel), f.data, try std.fmt.allocPrint(a, "projection.{s}", .{rel}), faults);
+        for (files) |f| if (std.mem.eql(u8, f.rel, rel)) try writeAtomic(a, try join(a, out, rel), f.data, try a.print("projection.{s}", .{rel}), faults);
     }
     var names: std.ArrayList(V) = .empty;
     for (sorted) |f| try names.append(a, S(f.rel));
@@ -2219,7 +2219,7 @@ fn parseOpts(a: Allocator, cmd: []const u8, args: []const []const u8, opts: []Op
             std.process.exit(0);
         }
         if (!std.mem.startsWith(u8, arg, "--")) usageError("unrecognized arguments: {s}", .{arg});
-        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const eq = std.mem.findScalar(u8, arg, '=');
         const name = arg[2 .. eq orelse arg.len];
         var match: ?*Opt = null;
         var count: usize = 0;
@@ -2245,7 +2245,7 @@ fn parseOpts(a: Allocator, cmd: []const u8, args: []const []const u8, opts: []Op
         }
     }
     var missing: std.ArrayList([]const u8) = .empty;
-    for (opts) |o| if (o.required and o.value == null) missing.append(a, std.fmt.allocPrint(a, "--{s}", .{o.name}) catch o.name) catch oom();
+    for (opts) |o| if (o.required and o.value == null) missing.append(a, a.print("--{s}", .{o.name}) catch o.name) catch oom();
     if (missing.items.len > 0) usageError("the following arguments are required: {s}", .{std.mem.join(a, ", ", missing.items) catch ""});
 }
 
@@ -2352,7 +2352,7 @@ test "file stems stay in one directory" {
     const long = r_x400;
     for ([_][]const u8{ "..", ".", "", "a/b", &long, "a\x00b" }) |name| {
         const stem = try fileStem(a, name);
-        try testing.expect(std.mem.indexOfScalar(u8, stem, '/') == null);
+        try testing.expect(std.mem.findScalar(u8, stem, '/') == null);
         try testing.expect(!std.mem.eql(u8, stem, "") and !std.mem.eql(u8, stem, ".") and !std.mem.eql(u8, stem, ".."));
         try testing.expect(stem.len <= 150);
     }
@@ -2454,7 +2454,7 @@ test "JSON errors read as Python's decoder prints them" {
     };
     for (cases) |c| {
         try testing.expectError(error.Refused, strictJson(a, c[0], "x"));
-        const want = try std.fmt.allocPrint(a, "x is not JSON: {s}", .{c[1]});
+        const want = try a.print("x is not JSON: {s}", .{c[1]});
         try testing.expectEqualStrings(want, lastMessage());
     }
 }

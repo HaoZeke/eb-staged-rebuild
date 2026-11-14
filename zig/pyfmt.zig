@@ -21,7 +21,7 @@ fn appendFloat(out: *std.ArrayList(u8), a: Allocator, f: f64) Allocator.Error!vo
 /// escapes for the quote, backslash, \t \n \r, other control characters
 /// and the surrogate escapes of invalid bytes as \xNN.
 pub fn reprStr(out: *std.ArrayList(u8), a: Allocator, s: []const u8) Allocator.Error!void {
-    const q: u8 = if (std.mem.indexOfScalar(u8, s, '\'') != null and std.mem.indexOfScalar(u8, s, '"') == null) '"' else '\'';
+    const q: u8 = if (std.mem.findScalar(u8, s, '\'') != null and std.mem.findScalar(u8, s, '"') == null) '"' else '\'';
     try out.append(a, q);
     var i: usize = 0;
     while (i < s.len) {
@@ -29,7 +29,7 @@ pub fn reprStr(out: *std.ArrayList(u8), a: Allocator, s: []const u8) Allocator.E
         const cp = ch.cp orelse {
             // surrogateescape: U+DCxx, printed as \udcxx.
             var b: [8]u8 = undefined;
-            try out.appendSlice(a, std.fmt.bufPrint(&b, "\\udc{x:0>2}", .{s[i]}) catch unreachable);
+            try out.appendSlice(a, std.mem.print(&b, "\\udc{x:0>2}", .{s[i]}) catch unreachable);
             i += 1;
             continue;
         };
@@ -44,10 +44,10 @@ pub fn reprStr(out: *std.ArrayList(u8), a: Allocator, s: []const u8) Allocator.E
                     try out.append(a, q);
                 } else if (cp < 0x20 or cp == 0x7f) {
                     var b: [8]u8 = undefined;
-                    try out.appendSlice(a, std.fmt.bufPrint(&b, "\\x{x:0>2}", .{cp}) catch unreachable);
+                    try out.appendSlice(a, std.mem.print(&b, "\\x{x:0>2}", .{cp}) catch unreachable);
                 } else if (cp >= 0x80 and cp < 0xa0) {
                     var b: [8]u8 = undefined;
-                    try out.appendSlice(a, std.fmt.bufPrint(&b, "\\x{x:0>2}", .{cp}) catch unreachable);
+                    try out.appendSlice(a, std.mem.print(&b, "\\x{x:0>2}", .{cp}) catch unreachable);
                 } else try out.appendSlice(a, s[i .. i + ch.len]);
             },
         }

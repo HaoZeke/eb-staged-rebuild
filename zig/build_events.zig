@@ -45,7 +45,7 @@ const Refusal = error{ Refused, OutOfMemory };
 var why: []const u8 = "";
 
 fn refuse(a: Allocator, comptime f: []const u8, args: anytype) Refusal {
-    why = std.fmt.allocPrint(a, f, args) catch "refused";
+    why = a.print(f, args) catch "refused";
     return error.Refused;
 }
 
@@ -102,7 +102,7 @@ fn text(a: Allocator, value: ?Py, what: []const u8, limit: usize) Refusal![]cons
     const v = value orelse return refuse(a, "{s} must be a non-empty string of at most {d} characters", .{ what, limit });
     if (v != .str or v.str.len == 0 or charLen(v.str) > limit) return refuse(a, "{s} must be a non-empty string of at most {d} characters", .{ what, limit });
     for (v.str) |c| if (c < 32 or c == 127) return refuse(a, "{s} contains a control character", .{what});
-    if (std.mem.indexOf(u8, v.str, "-----BEGIN") != null) return refuse(a, "{s} looks like key material; keys never go in a record", .{what});
+    if (std.mem.find(u8, v.str, "-----BEGIN") != null) return refuse(a, "{s} looks like key material; keys never go in a record", .{what});
     return v.str;
 }
 
@@ -157,7 +157,7 @@ fn sha(a: Allocator, value: ?Py, what: []const u8) Refusal![]const u8 {
 fn uri(a: Allocator, value: ?Py, what: []const u8) Refusal![]const u8 {
     const t = try text(a, value, what, 2048);
     var scheme_end: ?usize = null;
-    if (std.mem.indexOfScalar(u8, t, ':')) |c| {
+    if (std.mem.findScalar(u8, t, ':')) |c| {
         var ok = c > 0 and std.ascii.isAlphabetic(t[0]);
         for (t[0..c]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '-' or ch == '.')) {
             ok = false;
@@ -170,12 +170,12 @@ fn uri(a: Allocator, value: ?Py, what: []const u8) Refusal![]const u8 {
         const end = std.mem.indexOfAnyPos(u8, rest, 2, "/?#") orelse rest.len;
         netloc = rest[2..end];
     }
-    const has_query = if (std.mem.indexOfScalar(u8, rest, '?')) |q| blk: {
-        const hash = std.mem.indexOfScalar(u8, rest, '#') orelse rest.len;
+    const has_query = if (std.mem.findScalar(u8, rest, '?')) |q| blk: {
+        const hash = std.mem.findScalar(u8, rest, '#') orelse rest.len;
         break :blk q < hash and q + 1 < hash;
     } else false;
-    const has_fragment = if (std.mem.indexOfScalar(u8, rest, '#')) |h| h + 1 < rest.len else false;
-    if (scheme_end == null or std.mem.indexOfScalar(u8, netloc, '@') != null or has_query or has_fragment)
+    const has_fragment = if (std.mem.findScalar(u8, rest, '#')) |h| h + 1 < rest.len else false;
+    if (scheme_end == null or std.mem.findScalar(u8, netloc, '@') != null or has_query or has_fragment)
         return refuse(a, "{s} must be a URI without credentials, query or fragment", .{what});
     return t;
 }
@@ -197,9 +197,9 @@ fn matchSegments(t: []const u8) bool {
 
 fn matchFileName(t: []const u8) bool {
     if (t.len == 0) return false;
-    const first_ok = std.ascii.isAlphanumeric(t[0]) or std.mem.indexOfScalar(u8, "_.+~-", t[0]) != null;
+    const first_ok = std.ascii.isAlphanumeric(t[0]) or std.mem.findScalar(u8, "_.+~-", t[0]) != null;
     if (!first_ok) return false;
-    for (t[1..]) |c| if (!(std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "_.+~=,-", c) != null)) return false;
+    for (t[1..]) |c| if (!(std.ascii.isAlphanumeric(c) or std.mem.findScalar(u8, "_.+~=,-", c) != null)) return false;
     return true;
 }
 
@@ -232,7 +232,7 @@ fn checkConfig(a: Allocator, raw: Py) Refusal!Py {
     var config = try object(a, raw, "build-event config", &config_keys);
     for (config_paths) |k| {
         if (!has(config, k)) return refuse(a, "build-event config needs {s}", .{k});
-        _ = try cleanPath(a, get(config, k), try std.fmt.allocPrint(a, "build-event config {s}", .{k}));
+        _ = try cleanPath(a, get(config, k), try a.print("build-event config {s}", .{k}));
     }
     if (notNone(config, "public_key")) {
         _ = try cleanPath(a, get(config, "public_key"), "build-event config public_key");
@@ -274,12 +274,12 @@ fn fileList(a: Allocator, value: ?Py, what: []const u8) Refusal!Py {
     if (v != .list or v.list.len > list_limit) return refuse(a, "{s} must be a list of at most {d} entries", .{ what, list_limit });
     var items: std.ArrayList(Py) = .empty;
     for (v.list, 0..) |item_in, at| {
-        const w = try std.fmt.allocPrint(a, "{s}[{d}]", .{ what, at });
+        const w = try a.print("{s}[{d}]", .{ what, at });
         const item = try object(a, item_in, w, &.{ "name", "sha256" });
-        const name = try text(a, get(item, "name"), try std.fmt.allocPrint(a, "{s}.name", .{w}), 255);
+        const name = try text(a, get(item, "name"), try a.print("{s}.name", .{w}), 255);
         if (!matchFileName(name) or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
             return refuse(a, "{s}.name must be a plain file name: {s}", .{ w, reprOf(a, name) });
-        try items.append(a, dict(a, &.{ .{ .key = "name", .value = Py.s(name) }, .{ .key = "sha256", .value = Py.s(try sha(a, get(item, "sha256"), try std.fmt.allocPrint(a, "{s}.sha256", .{w}))) } }));
+        try items.append(a, dict(a, &.{ .{ .key = "name", .value = Py.s(name) }, .{ .key = "sha256", .value = Py.s(try sha(a, get(item, "sha256"), try a.print("{s}.sha256", .{w}))) } }));
     }
     return .{ .list = items.items };
 }
@@ -288,7 +288,7 @@ fn checkMetadata(a: Allocator, raw: Py) Refusal!Py {
     const meta = try object(a, raw, "build-event metadata", &metadata_keys);
     var out: std.ArrayList(Py.Entry) = .empty;
     const operation = try text(a, get(meta, "operation"), "operation", 128);
-    if (!matchOperation(operation) or std.mem.indexOf(u8, operation, "..") != null)
+    if (!matchOperation(operation) or std.mem.find(u8, operation, "..") != null)
         return refuse(a, "operation must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$ without '..': {s}", .{reprOf(a, operation)});
     try out.append(a, .{ .key = "operation", .value = Py.s(operation) });
     for ([_][]const u8{ "actor", "stack", "module" }) |k| try out.append(a, .{ .key = k, .value = Py.s(try text(a, get(meta, k), k, text_limit)) });
@@ -331,7 +331,7 @@ fn checkMetadata(a: Allocator, raw: Py) Refusal!Py {
     if (notNone(meta, "tool")) {
         const tool = try object(a, get(meta, "tool"), "tool", &.{ "name", "version", "revision" });
         var tl: std.ArrayList(Py.Entry) = .empty;
-        for ([_][]const u8{ "name", "version", "revision" }) |k| if (has(tool, k)) try tl.append(a, .{ .key = k, .value = Py.s(try text(a, get(tool, k), try std.fmt.allocPrint(a, "tool.{s}", .{k}), 256)) });
+        for ([_][]const u8{ "name", "version", "revision" }) |k| if (has(tool, k)) try tl.append(a, .{ .key = k, .value = Py.s(try text(a, get(tool, k), try a.print("tool.{s}", .{k}), 256)) });
         if (!has(tool, "name")) return refuse(a, "tool.name is required", .{});
         try out.append(a, .{ .key = "tool", .value = .{ .dict = tl.items } });
     }
@@ -339,11 +339,11 @@ fn checkMetadata(a: Allocator, raw: Py) Refusal!Py {
     if (logs != .list or logs.list.len > list_limit) return refuse(a, "logs must be a list of at most {d} references", .{list_limit});
     var lout: std.ArrayList(Py) = .empty;
     for (logs.list, 0..) |ref_in, at| {
-        const w = try std.fmt.allocPrint(a, "logs[{d}]", .{at});
+        const w = try a.print("logs[{d}]", .{at});
         const ref = try object(a, ref_in, w, &.{ "uri", "sha256" });
         var e: std.ArrayList(Py.Entry) = .empty;
-        try e.append(a, .{ .key = "uri", .value = Py.s(try uri(a, get(ref, "uri"), try std.fmt.allocPrint(a, "{s}.uri", .{w}))) });
-        if (notNone(ref, "sha256")) try e.append(a, .{ .key = "sha256", .value = Py.s(try sha(a, get(ref, "sha256"), try std.fmt.allocPrint(a, "{s}.sha256", .{w}))) });
+        try e.append(a, .{ .key = "uri", .value = Py.s(try uri(a, get(ref, "uri"), try a.print("{s}.uri", .{w}))) });
+        if (notNone(ref, "sha256")) try e.append(a, .{ .key = "sha256", .value = Py.s(try sha(a, get(ref, "sha256"), try a.print("{s}.sha256", .{w}))) });
         try lout.append(a, .{ .dict = e.items });
     }
     try out.append(a, .{ .key = "logs", .value = .{ .list = lout.items } });
@@ -377,7 +377,7 @@ fn hashFile(a: Allocator, path: []const u8, problem: *[]const u8) ?struct { dige
         return null;
     };
     if (!st.isReg()) {
-        problem.* = std.fmt.allocPrint(a, "{s} is not a regular file", .{path}) catch "";
+        problem.* = a.print("{s} is not a regular file", .{path}) catch "";
         return null;
     }
     var h = std.crypto.hash.sha2.Sha256.init(.{});
@@ -418,12 +418,12 @@ fn resolveInputs(a: Allocator, meta: Py) Refusal!Py {
 }
 
 fn eventId(a: Allocator, operation: []const u8, stage: []const u8) []const u8 {
-    return std.fmt.allocPrint(a, "eb-build-events/{s}/{s}", .{ operation, stage }) catch "";
+    return a.print("eb-build-events/{s}/{s}", .{ operation, stage }) catch "";
 }
 
 fn targetOf(a: Allocator, meta: Py) []const u8 {
     const t = get(meta, "target").?;
-    if (has(t, "accelerator")) return std.fmt.allocPrint(a, "{s}/accel/{s}", .{ s(get(t, "cpu")), s(get(t, "accelerator")) }) catch "";
+    if (has(t, "accelerator")) return a.print("{s}/accel/{s}", .{ s(get(t, "cpu")), s(get(t, "accelerator")) }) catch "";
     return s(get(t, "cpu"));
 }
 
@@ -433,7 +433,7 @@ fn utc(a: Allocator, t: f64) []const u8 {
     const day = es.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
+    return a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
 }
 
 fn baseRecord(a: Allocator, meta: Py, stage: []const u8, now: f64) Py {
@@ -488,9 +488,9 @@ fn postBuild(a: Allocator, meta: Py, fields: *std.ArrayList(Py.Entry)) ?Problem 
         const mf = get(meta, "modulefile").?;
         const path = s(get(mf, "path"));
         var problem: []const u8 = "";
-        const h = hashFile(a, path, &problem) orelse return .{ .kind = "modulefile-unreadable", .text = std.fmt.allocPrint(a, "module file {s} cannot be hashed: {s}", .{ path, problem }) catch "" };
+        const h = hashFile(a, path, &problem) orelse return .{ .kind = "modulefile-unreadable", .text = a.print("module file {s} cannot be hashed: {s}", .{ path, problem }) catch "" };
         if (has(mf, "sha256") and !std.mem.eql(u8, s(get(mf, "sha256")), h.digest))
-            return .{ .kind = "modulefile-mismatch", .text = std.fmt.allocPrint(a, "module file {s} hashes to {s}, not the supplied {s}", .{ path, h.digest, s(get(mf, "sha256")) }) catch "" };
+            return .{ .kind = "modulefile-mismatch", .text = a.print("module file {s} hashes to {s}, not the supplied {s}", .{ path, h.digest, s(get(mf, "sha256")) }) catch "" };
         fields.append(a, .{ .key = "modulefile", .value = dict(a, &.{ .{ .key = "path", .value = Py.s(path) }, .{ .key = "sha256", .value = Py.s(h.digest) } }) }) catch oom();
     }
     if (has(meta, "artifact")) {
@@ -498,11 +498,11 @@ fn postBuild(a: Allocator, meta: Py, fields: *std.ArrayList(Py.Entry)) ?Problem 
         if (has(art, "path")) {
             const path = s(get(art, "path"));
             var problem: []const u8 = "";
-            const h = hashFile(a, path, &problem) orelse return .{ .kind = "artifact-unreadable", .text = std.fmt.allocPrint(a, "artifact {s} cannot be hashed: {s}", .{ path, problem }) catch "" };
-            const accession = std.fmt.allocPrint(a, "sha256:{s}", .{h.digest}) catch "";
+            const h = hashFile(a, path, &problem) orelse return .{ .kind = "artifact-unreadable", .text = a.print("artifact {s} cannot be hashed: {s}", .{ path, problem }) catch "" };
+            const accession = a.print("sha256:{s}", .{h.digest}) catch "";
             if (!has(art, "accession")) art = set(a, art, "accession", Py.s(accession));
             if (!std.mem.eql(u8, s(get(art, "accession")), accession))
-                return .{ .kind = "artifact-mismatch", .text = std.fmt.allocPrint(a, "artifact {s} is {s}, not the supplied {s}", .{ path, accession, s(get(art, "accession")) }) catch "" };
+                return .{ .kind = "artifact-mismatch", .text = a.print("artifact {s} is {s}, not the supplied {s}", .{ path, accession, s(get(art, "accession")) }) catch "" };
             art = set(a, art, "size", .{ .int = @intCast(h.size) });
         }
         fields.append(a, .{ .key = "artifact", .value = art }) catch oom();
@@ -516,7 +516,7 @@ fn reason(a: Allocator, status: Py) []const u8 {
     if (std.mem.eql(u8, outcome, "not-started")) return "the command could not be started";
     var b: std.ArrayList(u8) = .empty;
     pyfmt.str(&b, a, get(status, "exit_status")) catch oom();
-    return std.fmt.allocPrint(a, "the command exited {s}", .{b.items}) catch "";
+    return a.print("the command exited {s}", .{b.items}) catch "";
 }
 
 fn exitStatus(status: Py) ?i64 {
@@ -595,26 +595,26 @@ const Op = struct {
     fn load(op: *Op) error{ Refused, OutOfMemory, NeedsIntervention }!?Py {
         if (!lexists(op.path)) return null;
         const f = fsx.openRegular(fsx.cwd, op.path, true) catch |err| {
-            why = std.fmt.allocPrint(op.a, "operation state cannot be read: {s}: {s}", .{ op.path, main_mod.osError(op.a, err, op.path) }) catch "";
+            why = op.a.print("operation state cannot be read: {s}: {s}", .{ op.path, main_mod.osError(op.a, err, op.path) }) catch "";
             return error.NeedsIntervention;
         };
         defer sys.close(f.fd);
         const raw = fsx.readAll(op.a, f.fd, 256 << 20) catch {
-            why = std.fmt.allocPrint(op.a, "operation state cannot be read: {s}", .{op.path}) catch "";
+            why = op.a.print("operation state cannot be read: {s}", .{op.path}) catch "";
             return error.NeedsIntervention;
         };
         const v = json.toPy(op.a, json.parse(op.a, raw) catch {
-            why = std.fmt.allocPrint(op.a, "operation state cannot be read: {s}: not valid JSON", .{op.path}) catch "";
+            why = op.a.print("operation state cannot be read: {s}: not valid JSON", .{op.path}) catch "";
             return error.NeedsIntervention;
         }) catch {
-            why = std.fmt.allocPrint(op.a, "operation state cannot be read: {s}: not valid JSON", .{op.path}) catch "";
+            why = op.a.print("operation state cannot be read: {s}: not valid JSON", .{op.path}) catch "";
             return error.NeedsIntervention;
         };
         const sch = get(v, "schema");
         if (sch == null or sch.? != .int or sch.?.int != 1) {
             var b: std.ArrayList(u8) = .empty;
             try pyfmt.repr(&b, op.a, sch orelse .null);
-            why = std.fmt.allocPrint(op.a, "operation state schema {s} is not 1", .{b.items}) catch "";
+            why = op.a.print("operation state schema {s} is not 1", .{b.items}) catch "";
             return error.NeedsIntervention;
         }
         return v;
@@ -626,15 +626,15 @@ const Op = struct {
     fn need(op: *Op, v: ?Py, key: []const u8) error{NeedsIntervention}!Py {
         const field = if (v) |d| get(d, key) else null;
         return field orelse {
-            why = std.fmt.allocPrint(op.a, "operation state {s} has no {s}; inspect or remove it", .{ op.path, key }) catch oom();
+            why = op.a.print("operation state {s} has no {s}; inspect or remove it", .{ op.path, key }) catch oom();
             return error.NeedsIntervention;
         };
     }
 
     fn save(op: *Op, st: Py, step: []const u8) Refusal!void {
-        const raw = try std.fmt.allocPrint(op.a, "{s}\n", .{try json.dumps(op.a, st, 2, true)});
+        const raw = try op.a.print("{s}\n", .{try json.dumps(op.a, st, 2, true)});
         var w: atomic.Why = .{};
-        atomic.atomicWrite(op.a, op.path, raw, .{ .faults = op.ctx.faults(), .step = try std.fmt.allocPrint(op.a, "build_events.{s}", .{step}) }, &w) catch |err|
+        atomic.atomicWrite(op.a, op.path, raw, .{ .faults = op.ctx.faults(), .step = try op.a.print("build_events.{s}", .{step}) }, &w) catch |err|
             return refuse(op.a, "{s}", .{if (err == error.Refused) w.msg else main_mod.osError(op.a, err, op.path)});
     }
 
@@ -686,7 +686,7 @@ const Outcome = struct { code: u8, message: []const u8 };
 fn pendingText(a: Allocator, left: []const Py) []const u8 {
     var e: std.ArrayList(u8) = .empty;
     pyfmt.str(&e, a, get(left[0], "error")) catch oom();
-    return std.fmt.allocPrint(a, "{d} ledger event(s) not acknowledged ({s})", .{ left.len, e.items }) catch "";
+    return a.print("{d} ledger event(s) not acknowledged ({s})", .{ left.len, e.items }) catch "";
 }
 
 fn finish(op: *Op, st: Py, recorded: bool) error{ Refused, OutOfMemory, NeedsIntervention }!Outcome {
@@ -697,11 +697,11 @@ fn finish(op: *Op, st: Py, recorded: bool) error{ Refused, OutOfMemory, NeedsInt
     const has_problem = problem != null and problem.? != .null;
     var code = exitCode(status, has_problem);
     var notes: std.ArrayList([]const u8) = .empty;
-    try notes.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ s(get(try op.need(st, "terminal"), "stage")), reason(a, status) }));
+    try notes.append(a, try a.print("{s}: {s}", .{ s(get(try op.need(st, "terminal"), "stage")), reason(a, status) }));
     if (has_problem) try notes.append(a, s(problem));
     if (recorded) try notes.append(a, "recorded by an earlier attempt; the command was not repeated");
     if (left.len > 0) {
-        try notes.append(a, try std.fmt.allocPrint(a, "ledger error: {s}; retry to deliver from {s}", .{ pendingText(a, left), op.dir }));
+        try notes.append(a, try a.print("ledger error: {s}; retry to deliver from {s}", .{ pendingText(a, left), op.dir }));
         if (code == 0) code = publish.pending_exit;
     }
     return .{ .code = code, .message = try std.mem.join(a, "; ", notes.items) };
@@ -791,11 +791,11 @@ fn runBuild(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config_raw: Py, metad
     }
     const left = try op.deliver(&.{try op.need(st, "started")}, "outbox.started");
     if (left.len > 0 and pyfmt.truthy(get(config, "required")))
-        return .{ .code = publish.pending_exit, .message = try std.fmt.allocPrint(a, "command not run: {s}; retry to deliver from {s}", .{ pendingText(a, left), op.dir }) };
+        return .{ .code = publish.pending_exit, .message = try a.print("command not run: {s}; retry to deliver from {s}", .{ pendingText(a, left), op.dir }) };
     st = set(a, st, "phase", Py.s("running"));
     try op.save(st, "running");
     var status: Py = undefined;
-    const exe = if (std.mem.indexOfScalar(u8, command[0], '/') != null) command[0] else (common.proc.which(a, command[0], env.get("PATH") orelse "/bin:/usr/bin") catch null);
+    const exe = if (std.mem.findScalar(u8, command[0], '/') != null) command[0] else (common.proc.which(a, command[0], env.get("PATH") orelse "/bin:/usr/bin") catch null);
     const runnable = blk: {
         const e = exe orelse break :blk false;
         var zb: [sys.path_max:0]u8 = undefined;
@@ -832,7 +832,7 @@ fn deliverOnly(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config_raw: Py, me
         return finish(&op, st, false);
     }
     const left = try op.deliver(&.{try op.need(st, "started")}, "outbox.started");
-    if (left.len > 0) return .{ .code = publish.pending_exit, .message = try std.fmt.allocPrint(a, "command not run: {s}", .{pendingText(a, left)}) };
+    if (left.len > 0) return .{ .code = publish.pending_exit, .message = try a.print("command not run: {s}", .{pendingText(a, left)}) };
     return .{ .code = 0, .message = "started acknowledged; the command has not run" };
 }
 
@@ -857,7 +857,7 @@ const help = usage ++
 
 fn onStop(sig: linux.SIG) callconv(.c) void {
     var buf: [128]u8 = undefined;
-    const m = std.fmt.bufPrint(&buf, "build-events: stopped by signal {d}; pending events stay in the outbox\n", .{@backingInt(sig)}) catch "build-events: stopped\n";
+    const m = std.mem.print(&buf, "build-events: stopped by signal {d}; pending events stay in the outbox\n", .{@backingInt(sig)}) catch "build-events: stopped\n";
     common.proc.stopGroup(publish.ledger_pgid.load(.seq_cst));
     cli.put(2, m);
     linux.exit_group(@intCast(128 + @backingInt(sig)));
@@ -885,7 +885,7 @@ pub fn main(a: Allocator, args_in: []const []const u8, env: probe.Env) u8 {
         inline for (.{ "config", "metadata" }) |name| {
             if (std.mem.eql(u8, x, "--" ++ name) or std.mem.startsWith(u8, x, "--" ++ name ++ "=")) {
                 var v: []const u8 = undefined;
-                if (std.mem.indexOfScalar(u8, x, '=')) |e| v = x[e + 1 ..] else {
+                if (std.mem.findScalar(u8, x, '=')) |e| v = x[e + 1 ..] else {
                     if (i + 1 >= args.len) {
                         cli.put(2, usage);
                         cli.err("{s}: error: argument --{s}: expected one argument\n", .{ who, name });

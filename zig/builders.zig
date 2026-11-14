@@ -39,12 +39,12 @@ fn groupRunning(a: Allocator, pgid: linux.pid_t) bool {
     while (it.next() catch null) |e| {
         _ = std.fmt.parseInt(u32, e.name, 10) catch continue;
         var pb: [64]u8 = undefined;
-        const p = std.fmt.bufPrint(&pb, "/proc/{s}/stat", .{e.name}) catch continue;
+        const p = std.mem.print(&pb, "/proc/{s}/stat", .{e.name}) catch continue;
         const f = fsx.openRegular(fsx.cwd, p, true) catch continue;
         defer sys.close(f.fd);
         var buf: [1024]u8 = undefined;
         const n = sys.read(f.fd, &buf) catch continue;
-        const close = std.mem.lastIndexOfScalar(u8, buf[0..n], ')') orelse continue;
+        const close = std.mem.findScalarLast(u8, buf[0..n], ')') orelse continue;
         var fields = std.mem.tokenizeAny(u8, buf[close + 1 .. n], " \n");
         const state = fields.next() orelse continue;
         _ = fields.next(); // ppid

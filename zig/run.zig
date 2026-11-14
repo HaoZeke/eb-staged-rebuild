@@ -55,7 +55,7 @@ pub const R = struct {
     }
 
     fn fail(r: *R, comptime which_err: E, comptime f: []const u8, args: anytype) E {
-        r.why = std.fmt.allocPrint(r.a, f, args) catch "out of memory";
+        r.why = r.a.print(f, args) catch "out of memory";
         return which_err;
     }
 
@@ -177,7 +177,7 @@ fn saveJournal(r: *R, path: []const u8, step: []const u8, faults: atomic.Faults)
     const p = r.get("publication");
     if (p == null or p.? == .null) r.set("publication", Py.s("directory-swap"));
     const body = json.dumps(r.a, r.journal, 2, true) catch return error.OutOfMemory;
-    const raw = std.fmt.allocPrint(r.a, "{s}\n", .{body}) catch return error.OutOfMemory;
+    const raw = r.a.print("{s}\n", .{body}) catch return error.OutOfMemory;
     try write(r, path, raw, step, null, faults);
 }
 
@@ -198,7 +198,7 @@ fn nowStampRunId(a: Allocator) []const u8 {
     const day = es.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(a, "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
+    return a.print("{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
 }
 
 fn runDir(a: Allocator, state_root: []const u8, run_id: []const u8) []const u8 {
@@ -226,7 +226,7 @@ fn childEnv(r: *R, env: probe.Env, software: []const u8, modules: []const u8, li
         if (std.mem.eql(u8, x, live_modules)) present = true;
     };
     if (!present) {
-        const joined = if (parts.items.len > 0) try std.fmt.allocPrint(a, "{s}:{s}", .{ live_modules, try std.mem.join(a, ":", parts.items) }) else live_modules;
+        const joined = if (parts.items.len > 0) try a.print("{s}:{s}", .{ live_modules, try std.mem.join(a, ":", parts.items) }) else live_modules;
         try b.set("MODULEPATH", joined);
     }
     return b.envp() catch |err| switch (err) {
@@ -237,7 +237,7 @@ fn childEnv(r: *R, env: probe.Env, software: []const u8, modules: []const u8, li
 }
 
 fn resolveExe(a: Allocator, env: probe.Env, name: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return admin.abspath(a, name);
+    if (std.mem.findScalar(u8, name, '/') != null) return admin.abspath(a, name);
     return common.proc.which(a, name, env.get("PATH") orelse "/bin:/usr/bin") catch null;
 }
 
@@ -255,7 +255,7 @@ fn relsFromDryRun(a: Allocator, text: []const u8) []const []const u8 {
         i += 1;
         const ws = i;
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) i += 1;
-        if (i == ws or i + 3 > line.len or line[i] != '[' or std.mem.indexOfScalar(u8, " xFR-", line[i + 1]) == null or line[i + 2] != ']') continue;
+        if (i == ws or i + 3 > line.len or line[i] != '[' or std.mem.findScalar(u8, " xFR-", line[i + 1]) == null or line[i + 2] != ']') continue;
         i += 3;
         const ws2 = i;
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) i += 1;
@@ -263,12 +263,12 @@ fn relsFromDryRun(a: Allocator, text: []const u8) []const []const u8 {
         // .*\(module:\s*(.+)\)\s*$ : the last "(module:" whose tail closes.
         const trimmed = std.mem.trimEnd(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ')') continue;
-        const at = std.mem.lastIndexOf(u8, trimmed[i..], "(module:") orelse continue;
+        const at = std.mem.findLast(u8, trimmed[i..], "(module:") orelse continue;
         var field = trimmed[i + at + "(module:".len .. trimmed.len - 1];
         field = std.mem.trimStart(u8, field, " \t");
         if (field.len == 0) continue;
         field = std.mem.trim(u8, field, " \t");
-        if (std.mem.indexOf(u8, field, " | ")) |bar| {
+        if (std.mem.find(u8, field, " | ")) |bar| {
             const sub = std.mem.trim(u8, field[0..bar], " \t");
             const short = std.mem.trim(u8, field[bar + 3 ..], " \t");
             rels.append(a, std.fs.path.join(a, &.{ sub, short }) catch continue) catch oom();
@@ -292,7 +292,7 @@ fn learnRels(r: *R) E![]const []const u8 {
     if (resolveExe(a, r.env, r.spec.eb_executable)) |exe| {
         if (common.proc.run(a, exe, cmd.items, envp, .{ .stdout_limit = 256 << 20, .stderr_limit = 64 << 20, .timeout_ms = null, .new_session = false })) |res| {
             code = res.term.code();
-            const both = try std.fmt.allocPrint(a, "{s}\n{s}", .{ res.stdout, res.stderr });
+            const both = try a.print("{s}\n{s}", .{ res.stdout, res.stderr });
             found = relsFromDryRun(a, both);
             tail = std.mem.trim(u8, if (res.stderr.len > 0) res.stderr else res.stdout, " \t\n\r");
         } else |err| return r.refuse("{s}", .{main_mod.osError(a, err, r.spec.eb_executable)});
@@ -355,14 +355,14 @@ fn build(r: *R) E!u8 {
     const software = try std.fs.path.join(a, &.{ gen, "software" });
     const modules = try std.fs.path.join(a, &.{ gen, "modules" });
     if (std.mem.eql(u8, r.spec.backend, "bwrap")) {
-        try cmd.appendSlice(a, &.{ r.spec.eb_executable, "--experimental", "--bwrap", try std.fmt.allocPrint(a, "--bwrap-installpath={s}", .{gen}), "--bwrap-options=--die-with-parent" });
+        try cmd.appendSlice(a, &.{ r.spec.eb_executable, "--experimental", "--bwrap", try a.print("--bwrap-installpath={s}", .{gen}), "--bwrap-options=--die-with-parent" });
         try cmd.appendSlice(a, filtered);
         envp = try childEnv(r, r.env, r.spec.software, r.spec.modules, r.spec.modules);
     } else {
         atomic.makedirs(software) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, software)});
         atomic.makedirs(modules) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, modules)});
         var inner: std.ArrayList([]const u8) = .empty;
-        try inner.appendSlice(a, &.{ r.spec.eb_executable, try std.fmt.allocPrint(a, "--installpath-software={s}", .{software}), try std.fmt.allocPrint(a, "--installpath-modules={s}", .{modules}) });
+        try inner.appendSlice(a, &.{ r.spec.eb_executable, try a.print("--installpath-software={s}", .{software}), try a.print("--installpath-modules={s}", .{modules}) });
         try inner.appendSlice(a, filtered);
         envp = try childEnv(r, r.env, software, modules, r.spec.modules);
         if (std.mem.eql(u8, r.spec.backend, "userns")) {
@@ -501,7 +501,7 @@ fn plan(r: *R) E!void {
         if (isKind(inst.staged, "symlink")) return r.refuse("staged installation {s} is a symlink", .{inst.staged});
         if (isKind(inst.live, "symlink")) return r.refuse("{s} is a symlink. Name/version must stay a real directory", .{inst.live});
         if (!isKind(inst.live, "dir")) return r.refuse("staged rebuild target must already be a real directory: {s}", .{inst.live});
-        const retired = try std.fs.path.join(a, &.{ std.fs.path.dirname(inst.live) orelse "/", try std.fmt.allocPrint(a, ".{s}.{s}", .{ std.fs.path.basename(inst.live), run_id }) });
+        const retired = try std.fs.path.join(a, &.{ std.fs.path.dirname(inst.live) orelse "/", try a.print(".{s}.{s}", .{ std.fs.path.basename(inst.live), run_id }) });
         if (!isKind(retired, "missing")) return r.refuse("retired path already exists: {s}", .{retired});
         const live_module = try std.fs.path.join(a, &.{ r.spec.modules, rel });
         if (!admin.isWithin(a, live_module, r.spec.modules)) return r.refuse("module path escapes the module root: {s}", .{rel});
@@ -516,7 +516,7 @@ fn plan(r: *R) E!void {
     for (drafted.items) |d| {
         const prepared = try std.fs.path.join(a, &.{ rdir, "prepared", d.rel });
         const metadata_source = if (isKind(d.live_module, "file")) d.live_module else d.path;
-        try write(r, prepared, d.text, try std.fmt.allocPrint(a, "prepare:{s}", .{d.rel}), metadata_source, r.faults());
+        try write(r, prepared, d.text, try a.print("prepare:{s}", .{d.rel}), metadata_source, r.faults());
         const stamp = Py{ .dict = &.{
             .{ .key = "run_id", .value = Py.s(run_id) },
             .{ .key = "staged", .value = Py.s(d.staged) },
@@ -524,9 +524,9 @@ fn plan(r: *R) E!void {
             .{ .key = "module", .value = Py.s(d.rel) },
             .{ .key = "sha256", .value = Py.s(sha(a, d.text)) },
         } };
-        const stamp_text = try std.fmt.allocPrint(a, "{s}\n", .{try json.dumps(a, stamp, 2, true)});
+        const stamp_text = try a.print("{s}\n", .{try json.dumps(a, stamp, 2, true)});
         const sealed = try withWritableDir(r, d.staged);
-        const res = write(r, try std.fs.path.join(a, &.{ d.staged, ".eb-staged-rebuild-complete" }), stamp_text, try std.fmt.allocPrint(a, "stamp:{s}", .{d.rel}), null, r.faults());
+        const res = write(r, try std.fs.path.join(a, &.{ d.staged, ".eb-staged-rebuild-complete" }), stamp_text, try a.print("stamp:{s}", .{d.rel}), null, r.faults());
         if (sealed) |m| chmod(d.staged, m);
         try res;
         const existed = isKind(d.live_module, "file");
@@ -664,7 +664,7 @@ fn prepareBackup(r: *R, m: Py) E!void {
         }
         if (!std.mem.eql(u8, current_hash, s(pyfmt.get(m, "old_hash")))) return r.intervene("{s} changed after the build", .{live});
         if (isKind(backup, "missing")) {
-            try write(r, backup, current, try std.fmt.allocPrint(a, "publish.backup:{s}", .{rel}), live, r.faults());
+            try write(r, backup, current, try a.print("publish.backup:{s}", .{rel}), live, r.faults());
         } else if (!isKind(backup, "file") or !std.mem.eql(u8, try fileHash(r, backup), s(pyfmt.get(m, "old_hash")))) {
             return r.intervene("backup for {s} does not match the previous module file", .{rel});
         }
@@ -693,7 +693,7 @@ fn prepareSwapSource(r: *R, m: Py, run_id: []const u8) E!void {
     const sk = kind(staged);
     const rk = kind(retired);
     if (std.mem.eql(u8, sk, "dir") and std.mem.eql(u8, rk, "missing")) {
-        try hit(r, r.faults(), try std.fmt.allocPrint(r.a, "stage.move:{s}", .{s(pyfmt.get(m, "rel"))}));
+        try hit(r, r.faults(), try r.a.print("stage.move:{s}", .{s(pyfmt.get(m, "rel"))}));
         try moveSealed(r, staged, retired);
         atomic.fsyncDir(std.fs.path.dirname(retired) orelse "/") catch {};
     } else if (!(std.mem.eql(u8, sk, "missing") and std.mem.eql(u8, rk, "dir"))) {
@@ -725,7 +725,7 @@ fn writeNewModule(r: *R, m: Py, faults: atomic.Faults) E!void {
     } else if (!std.mem.eql(u8, k, "missing")) {
         return r.intervene("{s} appeared before it could be published", .{live});
     }
-    try write(r, live, prepared, try std.fmt.allocPrint(a, "publish.file:{s}", .{rel}), s(pyfmt.get(m, "prepared")), faults);
+    try write(r, live, prepared, try a.print("publish.file:{s}", .{rel}), s(pyfmt.get(m, "prepared")), faults);
 }
 
 fn restoreOldModule(r: *R, m: Py, faults: atomic.Faults) E!void {
@@ -745,12 +745,12 @@ fn restoreOldModule(r: *R, m: Py, faults: atomic.Faults) E!void {
         }
         if (!std.mem.eql(u8, k, "file") or !std.mem.eql(u8, try fileHash(r, live), s(pyfmt.get(m, "new_hash"))))
             return r.intervene("{s} is neither the old nor new module file", .{live});
-        try write(r, live, previous, try std.fmt.allocPrint(a, "restore.file:{s}", .{rel}), backup, faults);
+        try write(r, live, previous, try a.print("restore.file:{s}", .{rel}), backup, faults);
         return;
     }
     if (std.mem.eql(u8, k, "missing")) return;
     if (std.mem.eql(u8, k, "file") and std.mem.eql(u8, try fileHash(r, live), s(pyfmt.get(m, "new_hash")))) {
-        try hit(r, faults, try std.fmt.allocPrint(a, "restore.remove:{s}", .{rel}));
+        try hit(r, faults, try a.print("restore.remove:{s}", .{rel}));
         sys.unlinkat(fsx.cwd, live, 0) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, live)});
         atomic.fsyncDir(std.fs.path.dirname(live) orelse "/") catch {};
         return;
@@ -783,7 +783,7 @@ fn createLinks(r: *R, faults: atomic.Faults) E!void {
         const parent = std.fs.path.dirname(path) orelse "/";
         if (symlinkComponent(a, parent)) |c| return r.refuse("{s} is a symlink", .{c});
         atomic.makedirs(parent) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, parent)});
-        try hit(r, faults, try std.fmt.allocPrint(a, "links.create:{s}", .{s(pyfmt.get(l, "rel"))}));
+        try hit(r, faults, try a.print("links.create:{s}", .{s(pyfmt.get(l, "rel"))}));
         var zt: [sys.path_max:0]u8 = undefined;
         var zp: [sys.path_max:0]u8 = undefined;
         const zt_ = sys.z(&zt, target) catch return r.refuse("bad link target", .{});
@@ -826,7 +826,7 @@ fn normalizeBaseline(r: *R) E!void {
         const live_is = lr != null and std.mem.eql(u8, lr.?, run_id);
         const retired_is = rr != null and std.mem.eql(u8, rr.?, run_id);
         if (live_is and !retired_is) {
-            _ = try swapPair(r, live, retired, .{}, try std.fmt.allocPrint(r.a, "recover:{s}", .{s(pyfmt.get(m, "rel"))}));
+            _ = try swapPair(r, live, retired, .{}, try r.a.print("recover:{s}", .{s(pyfmt.get(m, "rel"))}));
         } else if (!(!live_is and retired_is)) {
             return r.intervene("cannot identify old and staged trees for {s}: live run={s}, retired run={s}", .{ s(pyfmt.get(m, "rel")), reprOpt(r.a, lr), reprOpt(r.a, rr) });
         }
@@ -896,19 +896,19 @@ fn publishSteps(r: *R) E!void {
     try normalizeBaseline(r);
     for (r.list("modules_plan"), 0..) |m, i| {
         const rel = s(pyfmt.get(m, "rel"));
-        const method = try swapPair(r, s(pyfmt.get(m, "live_software")), s(pyfmt.get(m, "retired")), r.faults(), try std.fmt.allocPrint(a, "swap:{s}", .{rel}));
+        const method = try swapPair(r, s(pyfmt.get(m, "live_software")), s(pyfmt.get(m, "retired")), r.faults(), try a.print("swap:{s}", .{rel}));
         r.setItem("modules_plan", i, "status", Py.s("swapped"));
         r.setItem("modules_plan", i, "swap_method", Py.s(method));
         r.setItem("modules_plan", i, "published_at", .{ .float = now() });
         log("swapped {s} ({s})", .{ rel, method });
-        try r.save(try std.fmt.allocPrint(a, "journal.swap:{s}", .{rel}));
+        try r.save(try a.print("journal.swap:{s}", .{rel}));
     }
     for (r.list("modules_plan"), 0..) |m, i| {
         const rel = s(pyfmt.get(m, "rel"));
         try writeNewModule(r, m, r.faults());
         r.setItem("modules_plan", i, "status", Py.s("published"));
         log("published module {s}", .{rel});
-        try r.save(try std.fmt.allocPrint(a, "journal.module:{s}", .{rel}));
+        try r.save(try a.print("journal.module:{s}", .{rel}));
     }
     try createLinks(r, r.faults());
     r.set("state", Py.s("complete"));
@@ -951,19 +951,19 @@ fn preparePublication(r: *R) E!u8 {
         .{ .key = "stage_modules", .value = Py.s(r.str("stage_modules")) },
         .{ .key = "modules", .value = .{ .list = mods.items } },
     }) };
-    try write(r, context_path, try std.fmt.allocPrint(a, "{s}\n", .{try json.dumps(a, context, 2, true)}), "prepare.context", null, r.faults());
+    try write(r, context_path, try a.print("{s}\n", .{try json.dumps(a, context, 2, true)}), "prepare.context", null, r.faults());
     log("preparing publication permissions: {s} {s}", .{ exe, context_path });
     const rc = builders.runCommand(a, exe, &.{ exe, context_path }, r.env.envp, r.faults(), "prepare.invoke") catch |err| {
         if (err == error.Refused) return r.refuse("external commands require /proc to confirm their process group stopped", .{});
-        if (builders.injected_at) |st| return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno 5] injected failure at {s}", .{st}), 2);
+        if (builders.injected_at) |st| return preparationFailure(r, try a.print("publication preparation failed: [Errno 5] injected failure at {s}", .{st}), 2);
         const e: linux.E = if (err == error.ExecFailed) builders.exec_errno else .NOENT;
-        return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno {d}] {s}: '{s}'", .{ @backingInt(e), builders.strerror(e), exe }), 2);
+        return preparationFailure(r, try a.print("publication preparation failed: [Errno {d}] {s}: '{s}'", .{ @backingInt(e), builders.strerror(e), exe }), 2);
     };
     r.set("prepare_returncode", .{ .int = rc });
-    if (rc != 0) return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation exited {d}; the live directory was not swapped", .{rc}), rc);
+    if (rc != 0) return preparationFailure(r, try a.print("publication preparation exited {d}; the live directory was not swapped", .{rc}), rc);
     for (r.list("modules_plan")) |m| {
         if (!installComplete(a, s(pyfmt.get(m, "staged"))))
-            return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation left {s} incomplete at {s}; the live directory was not swapped", .{ s(pyfmt.get(m, "rel")), s(pyfmt.get(m, "staged")) }), 2);
+            return preparationFailure(r, try a.print("publication preparation left {s} incomplete at {s}; the live directory was not swapped", .{ s(pyfmt.get(m, "rel")), s(pyfmt.get(m, "staged")) }), 2);
     }
     validatePublicationSet(r) catch |err| switch (err) {
         error.Refused, error.NeedsIntervention => return preparationFailure(r, r.why, 2),
@@ -1031,7 +1031,7 @@ fn recordFinished(r: *R, config: ?Py, message: []const u8) E!Result {
     if (config) |c| {
         const left = try record(r, c, try records(r, c, "finished", null), "outbox.finished");
         if (left.len > 0) {
-            const m = try std.fmt.allocPrint(r.a, "{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
+            const m = try r.a.print("{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
             log("{s}", .{m});
             return .{ .code = publish_mod.pending_exit, .message = m };
         }
@@ -1049,7 +1049,7 @@ fn publishRecorded(r: *R) E!Result {
         try validatePublicationSet(r);
         const left = try record(r, c, try records(r, c, "started", null), "outbox.started");
         if (left.len > 0 and required(c)) {
-            const m = try std.fmt.allocPrint(r.a, "the live directory was not swapped: {s}", .{publish_mod.pendingMessage(r.a, left)});
+            const m = try r.a.print("the live directory was not swapped: {s}", .{publish_mod.pendingMessage(r.a, left)});
             r.set("message", Py.s(m));
             try r.save("journal.ledger_pending");
             log("{s}", .{m});
@@ -1057,7 +1057,7 @@ fn publishRecorded(r: *R) E!Result {
         }
     }
     try publish(r);
-    const message = try std.fmt.allocPrint(r.a, "run {s} published {d} module(s)", .{ r.str("run_id"), r.list("modules_plan").len });
+    const message = try r.a.print("run {s} published {d} module(s)", .{ r.str("run_id"), r.list("modules_plan").len });
     log("{s}", .{message});
     return recordFinished(r, config, message);
 }
@@ -1065,7 +1065,7 @@ fn publishRecorded(r: *R) E!Result {
 fn runLocked(r: *R, fresh_build: bool) E!Result {
     if (fresh_build) {
         const rc = try build(r);
-        if (rc != 0) return failRun(r, try std.fmt.allocPrint(r.a, "eb exited {d}; live modules were not changed", .{rc}), rc);
+        if (rc != 0) return failRun(r, try r.a.print("eb exited {d}; live modules were not changed", .{rc}), rc);
         enforceManifest(r) catch |err| switch (err) {
             error.Refused => return failRun(r, r.why, 2),
             else => |e| return e,
@@ -1116,12 +1116,12 @@ pub fn run(r: *R, probes: Py) E!Result {
     for (rels) |rel| try checkInstallDir(r, rel);
     var run_id: []const u8 = r.spec.run_id orelse "";
     if (run_id.len == 0) {
-        const base = try std.fmt.allocPrint(a, "{s}-{d}", .{ nowStampRunId(a), linux.getpid() });
+        const base = try a.print("{s}-{d}", .{ nowStampRunId(a), linux.getpid() });
         run_id = base;
         var n: usize = 0;
         while (fsx.statAt(fsx.cwd, runDir(a, r.spec.state_root, run_id), true)) |_| {
             n += 1;
-            run_id = try std.fmt.allocPrint(a, "{s}-{d}", .{ base, n });
+            run_id = try a.print("{s}-{d}", .{ base, n });
         } else |_| {}
     }
     const l = try lockRoot(r);
@@ -1227,7 +1227,7 @@ pub fn resumeRun(a: Allocator, env: probe.Env, ctx: *admin.Ctx, state_root: []co
         published = true;
     };
     if (std.mem.eql(u8, state_name, "complete")) {
-        const m = try std.fmt.allocPrint(a, "run {s} is already complete", .{run_id});
+        const m = try a.print("run {s} is already complete", .{run_id});
         log("{s}", .{m});
         return recordFinished(&r, try publisher(&r), m);
     }
@@ -1254,7 +1254,7 @@ pub fn rollbackRun(r: *R) E!Result {
     if (config) |c| {
         const left = try record(r, c, &.{}, null);
         if (left.len > 0 and required(c)) {
-            const m = try std.fmt.allocPrint(a, "run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
+            const m = try a.print("run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
             log("{s}", .{m});
             return .{ .code = publish_mod.pending_exit, .message = m };
         }
@@ -1281,7 +1281,7 @@ pub fn rollbackRun(r: *R) E!Result {
             all = false;
         };
         if (all) {
-            const m = try std.fmt.allocPrint(a, "run {s} is already rolled back", .{run_id});
+            const m = try a.print("run {s} is already rolled back", .{run_id});
             log("{s}", .{m});
             return recordRollback(r, config, &finished, started, m);
         }
@@ -1290,7 +1290,7 @@ pub fn rollbackRun(r: *R) E!Result {
     if (config) |c| if (finished.count() > 0) {
         const left = try record(r, c, try records(r, c, "started", &finished), "outbox.rollback_started");
         if (left.len > 0 and required(c)) {
-            const m = try std.fmt.allocPrint(a, "run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
+            const m = try a.print("run {s} was not rolled back: {s}", .{ run_id, publish_mod.pendingMessage(a, left) });
             log("{s}", .{m});
             return .{ .code = publish_mod.pending_exit, .message = m };
         }
@@ -1305,7 +1305,7 @@ pub fn rollbackRun(r: *R) E!Result {
         r.why = first;
         return err;
     };
-    const m = try std.fmt.allocPrint(a, "run {s} rolled back; replacement kept at its retired path", .{run_id});
+    const m = try a.print("run {s} rolled back; replacement kept at its retired path", .{run_id});
     log("{s}", .{m});
     return recordRollback(r, config, &finished, started, m);
 }
@@ -1322,7 +1322,7 @@ fn recordRollback(r: *R, config: ?Py, finished: *const publish_mod.Corrects, sta
     }
     const left = try record(r, c, recs, "outbox.rollback_finished");
     if (left.len > 0) {
-        const m = try std.fmt.allocPrint(r.a, "{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
+        const m = try r.a.print("{s}; {s}", .{ message, publish_mod.pendingMessage(r.a, left) });
         log("{s}", .{m});
         return .{ .code = publish_mod.pending_exit, .message = m };
     }
@@ -1349,10 +1349,10 @@ fn rollbackSteps(r: *R) E!void {
         const method = if (done_already)
             (if (s(pyfmt.get(m, "rollback_method")).len > 0) s(pyfmt.get(m, "rollback_method")) else "recovered")
         else
-            try swapPair(r, live, retired, r.faults(), try std.fmt.allocPrint(a, "rollback.swap:{s}", .{rel}));
+            try swapPair(r, live, retired, r.faults(), try a.print("rollback.swap:{s}", .{rel}));
         r.setItem("modules_plan", i, "status", Py.s("restoring"));
         r.setItem("modules_plan", i, "rollback_method", Py.s(method));
-        try r.save(try std.fmt.allocPrint(a, "journal.rollback-swap:{s}", .{rel}));
+        try r.save(try a.print("journal.rollback-swap:{s}", .{rel}));
     }
     i = mods.len;
     while (i > 0) {
@@ -1362,13 +1362,13 @@ fn rollbackSteps(r: *R) E!void {
         try restoreOldModule(r, m, r.faults());
         r.setItem("modules_plan", i, "status", Py.s("restored"));
         log("restored {s}", .{rel});
-        try r.save(try std.fmt.allocPrint(a, "journal.restore:{s}", .{rel}));
+        try r.save(try a.print("journal.restore:{s}", .{rel}));
     }
     for (r.list("links_plan"), 0..) |l, k| {
         if (!pyfmt.truthy(pyfmt.get(l, "created"))) continue;
         const path = s(pyfmt.get(l, "live_path"));
         if (isKind(path, "symlink") and std.mem.eql(u8, readlinkText(a, path), s(pyfmt.get(l, "target")))) {
-            try hit(r, r.faults(), try std.fmt.allocPrint(a, "rollback.unlink:{s}", .{s(pyfmt.get(l, "rel"))}));
+            try hit(r, r.faults(), try a.print("rollback.unlink:{s}", .{s(pyfmt.get(l, "rel"))}));
             sys.unlinkat(fsx.cwd, path, 0) catch {};
             atomic.fsyncDir(std.fs.path.dirname(path) orelse "/") catch {};
         }
@@ -1392,7 +1392,7 @@ fn restorePublished(r: *R) E!void {
         const live_is = lr != null and std.mem.eql(u8, lr.?, run_id);
         const retired_is = rr != null and std.mem.eql(u8, rr.?, run_id);
         if (!live_is and retired_is) {
-            _ = try swapPair(r, live, retired, .{}, try std.fmt.allocPrint(r.a, "rollback-recover:{s}", .{s(pyfmt.get(m, "rel"))}));
+            _ = try swapPair(r, live, retired, .{}, try r.a.print("rollback-recover:{s}", .{s(pyfmt.get(m, "rel"))}));
         } else if (!(live_is and !retired_is)) {
             return r.intervene("cannot restore published tree for {s}", .{s(pyfmt.get(m, "rel"))});
         }

@@ -90,30 +90,30 @@ const actions = [_][]const u8{ "install", "rebuild-inplace", "rebuild-bump" };
 pub fn loadConfig(a: Allocator, path_in: []const u8, why: *[]const u8) Error!Py {
     const path = admin.abspath(a, path_in);
     const f = fsx.openRegular(fsx.cwd, path, true) catch |err| {
-        why.* = try std.fmt.allocPrint(a, "cannot read ledger config {s}: {s}", .{ path, main_mod.osError(a, err, path) });
+        why.* = try a.print("cannot read ledger config {s}: {s}", .{ path, main_mod.osError(a, err, path) });
         return error.Refused;
     };
     defer sys.close(f.fd);
     const raw = fsx.readAll(a, f.fd, 16 << 20) catch {
-        why.* = try std.fmt.allocPrint(a, "cannot read ledger config {s}: read error", .{path});
+        why.* = try a.print("cannot read ledger config {s}: read error", .{path});
         return error.Refused;
     };
     const parsed = json.parse(a, raw) catch {
-        why.* = try std.fmt.allocPrint(a, "cannot read ledger config {s}: not valid JSON", .{path});
+        why.* = try a.print("cannot read ledger config {s}: not valid JSON", .{path});
         return error.Refused;
     };
     var config = json.toPy(a, parsed) catch {
-        why.* = try std.fmt.allocPrint(a, "cannot read ledger config {s}: not valid JSON", .{path});
+        why.* = try a.print("cannot read ledger config {s}: not valid JSON", .{path});
         return error.Refused;
     };
     if (config != .dict) {
-        why.* = try std.fmt.allocPrint(a, "ledger config {s} is not a JSON object", .{path});
+        why.* = try a.print("ledger config {s} is not a JSON object", .{path});
         return error.Refused;
     }
     for ([_][]const u8{ "eb_stack", "log", "key", "head" }) |k| {
         const v = pyfmt.get(config, k);
         if (v == null or v.? != .str or v.?.str.len == 0 or v.?.str[0] != '/') {
-            why.* = try std.fmt.allocPrint(a, "ledger config {s} must be an absolute path", .{k});
+            why.* = try a.print("ledger config {s} must be an absolute path", .{k});
             return error.Refused;
         }
     }
@@ -128,7 +128,7 @@ pub fn loadConfig(a: Allocator, path_in: []const u8, why: *[]const u8) Error!Py 
     for (fields) |k| {
         const v = pyfmt.get(config, k);
         if (v == null or v.? != .str or v.?.str.len == 0) {
-            why.* = try std.fmt.allocPrint(a, "ledger config {s} must be a non-empty string", .{k});
+            why.* = try a.print("ledger config {s} must be a non-empty string", .{k});
             return error.Refused;
         }
     }
@@ -190,7 +190,7 @@ fn utc(a: Allocator, t: f64) []const u8 {
     const day = es.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
+    return a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
 }
 
 pub const Corrects = std.StringArrayHashMapUnmanaged(Py);
@@ -215,7 +215,7 @@ pub fn publicationRecords(a: Allocator, config: Py, journal: Py, stage: []const 
         var new = pyfmt.get(m, "new_hash") orelse .null;
         var old = pyfmt.get(m, "old_hash") orelse .null;
         if (corrects != null) std.mem.swap(Py, &new, &old);
-        const name = if (corrects != null) try std.fmt.allocPrint(a, "rollback-{s}", .{stage}) else stage;
+        const name = if (corrects != null) try a.print("rollback-{s}", .{stage}) else stage;
         const live = s(pyfmt.get(m, "live_software"));
         var entries: std.ArrayList(Py.Entry) = .empty;
         try entries.appendSlice(a, &.{
@@ -233,7 +233,7 @@ pub fn publicationRecords(a: Allocator, config: Py, journal: Py, stage: []const 
                 .{ .key = "previous_sha256", .value = old },
             }) } },
             .{ .key = "build", .value = .{ .dict = try a.dupe(Py.Entry, &.{
-                .{ .key = "event_id", .value = Py.s(try std.fmt.allocPrint(a, "eb-staged-rebuild/{s}/{s}/{s}/{s}", .{ scope, run_id, rel, name })) },
+                .{ .key = "event_id", .value = Py.s(try a.print("eb-staged-rebuild/{s}/{s}/{s}/{s}", .{ scope, run_id, rel, name })) },
                 .{ .key = "run_id", .value = Py.s(run_id) },
                 .{ .key = "module_file", .value = Py.s(rel) },
                 .{ .key = "tool", .value = Py.s("eb-staged-rebuild") },
@@ -241,7 +241,7 @@ pub fn publicationRecords(a: Allocator, config: Py, journal: Py, stage: []const 
         });
         if (corrects) |c| {
             try entries.append(a, .{ .key = "corrects", .value = c.get(rel).? });
-            try entries.append(a, .{ .key = "reason", .value = Py.s(try std.fmt.allocPrint(a, "run {s} was rolled back", .{run_id})) });
+            try entries.append(a, .{ .key = "reason", .value = Py.s(try a.print("run {s} was rolled back", .{run_id})) });
         }
         try records.append(a, .{ .dict = entries.items });
     }
@@ -258,33 +258,33 @@ pub fn load(a: Allocator, run_dir: []const u8, why: *[]const u8) Error!Py {
     const path = outboxPath(a, run_dir);
     if (fsx.statAt(fsx.cwd, path, false)) |_| {} else |_| return .{ .dict = try a.dupe(Py.Entry, &.{ .{ .key = "schema", .value = .{ .int = 1 } }, .{ .key = "events", .value = .{ .list = &.{} } } }) };
     const f = fsx.openRegular(fsx.cwd, path, true) catch |err| {
-        why.* = try std.fmt.allocPrint(a, "outbox cannot be read: {s}: {s}", .{ path, main_mod.osError(a, err, path) });
+        why.* = try a.print("outbox cannot be read: {s}: {s}", .{ path, main_mod.osError(a, err, path) });
         return error.NeedsIntervention;
     };
     defer sys.close(f.fd);
     const raw = fsx.readAll(a, f.fd, 256 << 20) catch {
-        why.* = try std.fmt.allocPrint(a, "outbox cannot be read: {s}", .{path});
+        why.* = try a.print("outbox cannot be read: {s}", .{path});
         return error.NeedsIntervention;
     };
     const data = json.toPy(a, json.parse(a, raw) catch {
-        why.* = try std.fmt.allocPrint(a, "outbox cannot be read: {s}: not valid JSON", .{path});
+        why.* = try a.print("outbox cannot be read: {s}: not valid JSON", .{path});
         return error.NeedsIntervention;
     }) catch {
-        why.* = try std.fmt.allocPrint(a, "outbox cannot be read: {s}: not valid JSON", .{path});
+        why.* = try a.print("outbox cannot be read: {s}: not valid JSON", .{path});
         return error.NeedsIntervention;
     };
     const sch = pyfmt.get(data, "schema");
     if (sch == null or sch.? != .int or sch.?.int != 1) {
         var b: std.ArrayList(u8) = .empty;
         try pyfmt.repr(&b, a, sch orelse .null);
-        why.* = try std.fmt.allocPrint(a, "outbox schema {s} is not 1", .{b.items});
+        why.* = try a.print("outbox schema {s} is not 1", .{b.items});
         return error.NeedsIntervention;
     }
     return data;
 }
 
 fn save(a: Allocator, run_dir: []const u8, data: Py, faults: atomic.Faults, step: []const u8, why: *[]const u8) Error!void {
-    const raw = try std.fmt.allocPrint(a, "{s}\n", .{try json.dumps(a, data, 2, true)});
+    const raw = try a.print("{s}\n", .{try json.dumps(a, data, 2, true)});
     var w: atomic.Why = .{};
     atomic.atomicWrite(a, outboxPath(a, run_dir), raw, .{ .faults = faults, .step = step }, &w) catch |err| {
         why.* = if (err == error.Refused) w.msg else main_mod.osError(a, err, outboxPath(a, run_dir));
@@ -335,8 +335,8 @@ pub fn deliver(a: Allocator, env_envp: common.proc.Envp, run_dir: []const u8, co
         if (std.mem.eql(u8, s(pyfmt.get(ev, "status")), "acknowledged")) continue;
         const id = s(pyfmt.get(ev, "event_id"));
         const seq: i64 = (pyfmt.get(ev, "seq") orelse Py{ .int = 0 }).int;
-        const record_path = try std.fs.path.join(a, &.{ run_dir, "events", try std.fmt.allocPrint(a, "{d:0>4}.json", .{@as(u64, @intCast(seq))}) });
-        const body = try std.fmt.allocPrint(a, "{s}\n", .{try dumpsInline(a, pyfmt.get(ev, "record").?, true)});
+        const record_path = try std.fs.path.join(a, &.{ run_dir, "events", try a.print("{d:0>4}.json", .{@as(u64, @intCast(seq))}) });
+        const body = try a.print("{s}\n", .{try dumpsInline(a, pyfmt.get(ev, "record").?, true)});
         const same = blk: {
             const f = fsx.openRegular(fsx.cwd, record_path, true) catch break :blk false;
             defer sys.close(f.fd);
@@ -345,12 +345,12 @@ pub fn deliver(a: Allocator, env_envp: common.proc.Envp, run_dir: []const u8, co
         };
         if (!same) {
             var w: atomic.Why = .{};
-            atomic.atomicWrite(a, record_path, body, .{ .faults = faults, .step = try std.fmt.allocPrint(a, "outbox.record:{s}", .{id}) }, &w) catch |err| {
+            atomic.atomicWrite(a, record_path, body, .{ .faults = faults, .step = try a.print("outbox.record:{s}", .{id}) }, &w) catch |err| {
                 why.* = if (err == error.Refused) w.msg else main_mod.osError(a, err, record_path);
                 return error.Refused;
             };
         }
-        faults.reach(try std.fmt.allocPrint(a, "ledger.append:{s}", .{id}));
+        faults.reach(try a.print("ledger.append:{s}", .{id}));
         const attempts = (pyfmt.get(ev, "attempts") orelse Py{ .int = 0 }).int + 1;
         ev = dictSet(a, ev, "attempts", .{ .int = attempts });
         const receipt = append(a, env_envp, config, record_path) catch |err| switch (err) {
@@ -358,18 +358,18 @@ pub fn deliver(a: Allocator, env_envp: common.proc.Envp, run_dir: []const u8, co
                 ev = dictSet(a, ev, "error", Py.s(last_publisher_error));
                 events[i] = ev;
                 data = dictSet(a, data, "events", .{ .list = events });
-                try save(a, run_dir, data, faults, try std.fmt.allocPrint(a, "outbox.failed:{s}", .{id}), why);
+                try save(a, run_dir, data, faults, try a.print("outbox.failed:{s}", .{id}), why);
                 return pendingEvents(a, data);
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        faults.reach(try std.fmt.allocPrint(a, "ledger.acked:{s}", .{id}));
+        faults.reach(try a.print("ledger.acked:{s}", .{id}));
         ev = dictSet(a, ev, "status", Py.s("acknowledged"));
         ev = dictSet(a, ev, "error", .null);
         ev = dictSet(a, ev, "receipt", receipt);
         events[i] = ev;
         data = dictSet(a, data, "events", .{ .list = events });
-        try save(a, run_dir, data, faults, try std.fmt.allocPrint(a, "outbox.acked:{s}", .{id}), why);
+        try save(a, run_dir, data, faults, try a.print("outbox.acked:{s}", .{id}), why);
     }
     return &.{};
 }
@@ -379,7 +379,7 @@ pub fn deliver(a: Allocator, env_envp: common.proc.Envp, run_dir: []const u8, co
 var last_publisher_error: []const u8 = "";
 
 fn publisherError(a: Allocator, comptime f: []const u8, args: anytype) error{Publisher} {
-    last_publisher_error = std.fmt.allocPrint(a, f, args) catch "publisher failed";
+    last_publisher_error = a.print(f, args) catch "publisher failed";
     return error.Publisher;
 }
 
@@ -435,7 +435,7 @@ fn parseSummary(line: []const u8) ?struct { replayed: bool, index: u64, id: []co
         rest = rest["already recorded record ".len..];
         replayed = true;
     } else return null;
-    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const sp = std.mem.findScalar(u8, rest, ' ') orelse return null;
     const index = std.fmt.parseInt(u64, rest[0..sp], 10) catch return null;
     rest = rest[sp..];
     if (!std.mem.startsWith(u8, rest, " id ")) return null;
@@ -445,7 +445,7 @@ fn parseSummary(line: []const u8) ?struct { replayed: bool, index: u64, id: []co
     rest = rest[64..];
     if (!std.mem.startsWith(u8, rest, "; head size ")) return null;
     rest = rest["; head size ".len..];
-    const sp2 = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const sp2 = std.mem.findScalar(u8, rest, ' ') orelse return null;
     const size = std.fmt.parseInt(u64, rest[0..sp2], 10) catch return null;
     rest = rest[sp2..];
     if (!std.mem.startsWith(u8, rest, " root ")) return null;
@@ -454,7 +454,7 @@ fn parseSummary(line: []const u8) ?struct { replayed: bool, index: u64, id: []co
     const root = rest[0..64];
     rest = rest[64..];
     if (rest.len != 0 and !std.mem.startsWith(u8, rest, "; ")) return null;
-    if (std.mem.indexOfScalar(u8, rest, '\n') != null) return null;
+    if (std.mem.findScalar(u8, rest, '\n') != null) return null;
     return .{ .replayed = replayed, .index = index, .id = id, .size = size, .root = root };
 }
 
@@ -490,7 +490,7 @@ fn append(a: Allocator, envp: common.proc.Envp, config: Py, record_path: []const
     const r = try bounded(a, envp, &argv, config);
     if (r.code != 0) return publisherError(a, "eb-stack ledger append exited {d}: {s}", .{ r.code, lastChars(std.mem.trim(u8, r.stderr, " \t\n\r"), 500) });
     const out = std.mem.trim(u8, r.stdout, " \t\n\r");
-    const first = out[0 .. std.mem.indexOfAny(u8, out, "\n\r") orelse out.len];
+    const first = out[0 .. std.mem.findAny(u8, out, "\n\r") orelse out.len];
     const m = parseSummary(first) orelse {
         var rp: std.ArrayList(u8) = .empty;
         try pyfmt.reprStr(&rp, a, lastChars(out, 500));
@@ -517,7 +517,7 @@ fn append(a: Allocator, envp: common.proc.Envp, config: Py, record_path: []const
     if (verified) {
         var pkb: std.ArrayList(u8) = .empty;
         try pyfmt.str(&pkb, a, pk);
-        const vargv = [_][]const u8{ ebs, "ledger", "verify", "--log", log_path, "--public-key", pkb.items, "--record", try std.fmt.allocPrint(a, "{d}", .{m.index}), "--head", head };
+        const vargv = [_][]const u8{ ebs, "ledger", "verify", "--log", log_path, "--public-key", pkb.items, "--record", try a.print("{d}", .{m.index}), "--head", head };
         const v = try bounded(a, envp, &vargv, config);
         if (v.code != 0) return publisherError(a, "eb-stack ledger verify exited {d}: {s}", .{ v.code, lastChars(std.mem.trim(u8, v.stderr, " \t\n\r"), 500) });
     }
@@ -534,7 +534,7 @@ fn append(a: Allocator, envp: common.proc.Envp, config: Py, record_path: []const
 pub fn pendingMessage(a: Allocator, left: []const Py) []const u8 {
     var e: std.ArrayList(u8) = .empty;
     pyfmt.str(&e, a, pyfmt.get(left[0], "error")) catch oom();
-    return std.fmt.allocPrint(a, "{d} ledger event(s) not acknowledged ({s}); run resume", .{ left.len, e.items }) catch "";
+    return a.print("{d} ledger event(s) not acknowledged ({s}); run resume", .{ left.len, e.items }) catch "";
 }
 
 test "parseSummary" {

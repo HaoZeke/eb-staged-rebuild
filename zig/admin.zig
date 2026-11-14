@@ -57,14 +57,14 @@ pub fn abspath(a: Allocator, p: []const u8) []const u8 {
         parts.append(a, seg) catch oom();
     }
     const joined = std.mem.join(a, "/", parts.items) catch return full;
-    return std.fmt.allocPrint(a, "/{s}", .{joined}) catch full;
+    return a.print("/{s}", .{joined}) catch full;
 }
 
 pub fn isWithin(a: Allocator, child: []const u8, parent: []const u8) bool {
     const c = abspath(a, child);
     const p = abspath(a, parent);
     if (std.mem.eql(u8, c, p)) return true;
-    const prefix = std.fmt.allocPrint(a, "{s}/", .{std.mem.trimEnd(u8, p, "/")}) catch return false;
+    const prefix = a.print("{s}/", .{std.mem.trimEnd(u8, p, "/")}) catch return false;
     return std.mem.startsWith(u8, c, prefix);
 }
 
@@ -153,7 +153,7 @@ fn saveJournal(c: *Ctx, path: []const u8, data_in: Py, step: []const u8) Py {
     }
     main_mod.requireDirectorySwap(c.a, data);
     const body = json.dumps(c.a, data, 2, true) catch refuse("out of memory", .{});
-    const raw = std.fmt.allocPrint(c.a, "{s}\n", .{body}) catch refuse("out of memory", .{});
+    const raw = c.a.print("{s}\n", .{body}) catch refuse("out of memory", .{});
     var why: atomic.Why = .{};
     atomic.atomicWrite(c.a, path, raw, .{ .faults = c.faults(), .step = step }, &why) catch |err|
         if (err == error.Refused) refuse("{s}", .{why.msg}) else refuse("{s}", .{main_mod.osError(c.a, err, path)});
@@ -194,8 +194,8 @@ fn gmtimeStamp(a: Allocator, t: f64, comptime with_dashes: bool) []const u8 {
     const day = es.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
     const ds = es.getDaySeconds();
-    if (with_dashes) return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
-    return std.fmt.allocPrint(a, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
+    if (with_dashes) return a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
+    return a.print("{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() }) catch "";
 }
 
 fn lexists(p: []const u8) bool {
@@ -254,14 +254,14 @@ fn statDev(c: *Ctx, p: []const u8) u64 {
 /// Rename `source` onto `destination` once the file's bytes are durable.
 fn move(c: *Ctx, source: []const u8, destination: []const u8, step: []const u8) void {
     const f = c.faults();
-    const fsync_step = std.fmt.allocPrint(c.a, "{s}.fsync", .{step}) catch step;
+    const fsync_step = c.a.print("{s}.fsync", .{step}) catch step;
     if (f.fails(fsync_step)) refuse("[Errno 5] injected failure at {s}", .{fsync_step});
     {
         const fd = sys.openat(fsx.cwd, source, .{}, 0) catch |err| refuse("{s}", .{main_mod.osError(c.a, err, source)});
         defer sys.close(fd);
         sys.fsync(fd) catch |err| refuse("{s}", .{main_mod.osError(c.a, err, source)});
     }
-    const rename_step = std.fmt.allocPrint(c.a, "{s}.rename", .{step}) catch step;
+    const rename_step = c.a.print("{s}.rename", .{step}) catch step;
     if (f.fails(rename_step)) refuse("[Errno 5] injected failure at {s}", .{rename_step});
     sys.renameat(fsx.cwd, source, fsx.cwd, destination) catch |err| switch (err) {
         error.CrossDevice => refuse("{s} and {s} are on different filesystems", .{ source, destination }),
@@ -288,12 +288,12 @@ pub fn retire(c: *Ctx, state_root_in: []const u8, module_file: []const u8, reaso
     var count: usize = 1;
     const retired_root = std.fs.path.join(a, &.{ state_root, "retired" }) catch state_root;
     while (lexists(std.fs.path.join(a, &.{ retired_root, name }) catch "") or
-        lexists(std.fs.path.join(a, &.{ state_root, "runs", std.fmt.allocPrint(a, "retire-{s}", .{name}) catch "" }) catch ""))
+        lexists(std.fs.path.join(a, &.{ state_root, "runs", a.print("retire-{s}", .{name}) catch "" }) catch ""))
     {
         count += 1;
-        name = std.fmt.allocPrint(a, "{s}-{d}", .{ stamp, count }) catch name;
+        name = a.print("{s}-{d}", .{ stamp, count }) catch name;
     }
-    const run_id = std.fmt.allocPrint(a, "retire-{s}", .{name}) catch name;
+    const run_id = a.print("retire-{s}", .{name}) catch name;
     const destination = std.fs.path.join(a, &.{ retired_root, name, std.mem.trimStart(u8, p.module, "/") }) catch "";
     atomic.makedirs(dirname(destination)) catch |err| refuse("{s}", .{main_mod.osError(a, err, dirname(destination))});
     if (statDev(c, dirname(p.module)) != statDev(c, dirname(destination))) {
@@ -456,7 +456,7 @@ fn safeRetiredPath(c: *Ctx, m: Py) []const u8 {
     const retired = abspath(c.a, retired_raw);
     if (live.len == 0 or retired.len == 0) refuse("journal has no live/retired software path", .{});
     if (std.mem.eql(u8, live, retired) or !std.mem.eql(u8, dirname(live), dirname(retired))) refuse("refusing retired path that is not a live sibling: {s}", .{retired});
-    const prefix = std.fmt.allocPrint(c.a, ".{s}.", .{std.fs.path.basename(live)}) catch "";
+    const prefix = c.a.print(".{s}.", .{std.fs.path.basename(live)}) catch "";
     if (!std.mem.startsWith(u8, std.fs.path.basename(retired), prefix)) refuse("refusing unexpected retired path name: {s}", .{retired});
     return retired;
 }
@@ -550,7 +550,7 @@ pub fn gc(c: *Ctx, state_root_in: []const u8, grace_hours: f64, dry_run: bool, i
             } else {
                 var b: std.ArrayList(u8) = .empty;
                 pyfmt.str(&b, a, pyfmt.get(j, "state")) catch oom();
-                why = std.fmt.allocPrint(a, "state {s} is kept", .{b.items}) catch "";
+                why = a.print("state {s} is kept", .{b.items}) catch "";
             }
             const w = when orelse {
                 actions.append(a, .{ .path = retired, .action = "keep", .reason = why }) catch oom();
@@ -561,7 +561,7 @@ pub fn gc(c: *Ctx, state_root_in: []const u8, grace_hours: f64, dry_run: bool, i
                 continue;
             }
             if (now - w < grace) {
-                actions.append(a, .{ .path = retired, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace ({s})", .{why}) catch why }) catch oom();
+                actions.append(a, .{ .path = retired, .action = "keep", .reason = a.print("within grace ({s})", .{why}) catch why }) catch oom();
                 continue;
             }
             actions.append(a, .{ .path = retired, .action = "remove", .reason = why }) catch oom();
@@ -605,9 +605,9 @@ pub fn gc(c: *Ctx, state_root_in: []const u8, grace_hours: f64, dry_run: bool, i
         if (referenced(c, dir, roots)) {
             actions.append(a, .{ .path = dir, .action = "keep", .reason = "a live module resolves inside it" }) catch oom();
         } else if (now < ready) {
-            actions.append(a, .{ .path = dir, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace (retired module); ready to remove by hand after {s}", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
+            actions.append(a, .{ .path = dir, .action = "keep", .reason = a.print("within grace (retired module); ready to remove by hand after {s}", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
         } else {
-            actions.append(a, .{ .path = dir, .action = "manual", .reason = std.fmt.allocPrint(a, "ready to remove by hand after {s}; gc does not delete the stable software directory", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
+            actions.append(a, .{ .path = dir, .action = "manual", .reason = a.print("ready to remove by hand after {s}; gc does not delete the stable software directory", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
         }
     }
     for (actions.items) |act| cli.out("{s}: {s} ({s})\n", .{ act.action, act.path, act.reason });

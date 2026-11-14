@@ -134,7 +134,7 @@ fn parseOpts(a: Allocator, args: []const []const u8, opts: []Opt, help: []const 
             extra.append(a, arg) catch oom();
             continue;
         }
-        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const eq = std.mem.findScalar(u8, arg, '=');
         const name = arg[2 .. eq orelse arg.len];
         var match: ?*Opt = null;
         var count: usize = 0;
@@ -603,7 +603,7 @@ fn cmdRun(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
             break;
         }
         if (!std.mem.startsWith(u8, arg, "--")) usageError(top_usage, prog, "unrecognized arguments: {s}", .{arg});
-        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const eq = std.mem.findScalar(u8, arg, '=');
         const name = arg[2 .. eq orelse arg.len];
         var hit: ?usize = null;
         var count: usize = 0;
