@@ -321,6 +321,7 @@ def each_impl(prefix, body):
 
 def run_matrix(fixture):
     failures = 0
+    total_extra = []
     steps = steps_reached(fixture)
     # The policy's success is durable once journal.prepared is renamed into
     # place; a kill after prepare.invoke and up to that rename reruns it.
@@ -339,6 +340,19 @@ def run_matrix(fixture):
             f"{fixture.name}: run killed at {step}", fixture, each_impl("crash", body), "run",
             prepare_runs=2 if step in rerun else 1, one_build=step in built,
         )
+        if step.endswith(".exchange.after"):
+            # Killed after the exchange, resumed to published, then rolled back.
+            def back(impl, root):
+                fixture.build(root)
+                how = kill_at(impl, fixture, fixture.run_args(root, "r1"), step, root)
+                assert finish(impl, fixture, ["resume", "--state-root", f"{root}/state", "r1"], root) == 0
+                rc = finish(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], root)
+                return {"kill": how, "rollback_rc": rc, **outcome(fixture, root, "r1")}
+            failures += compare(
+                f"{fixture.name}: run killed at {step}, resumed, rolled back", fixture,
+                each_impl("crash-back", back), "rollback", must_pause=True,
+            )
+            total_extra.append(1)
     rollback_steps = steps_rollback(fixture)
     for step in rollback_steps:
         def body(impl, root):
@@ -348,7 +362,7 @@ def run_matrix(fixture):
             rc = finish(impl, fixture, ["rollback", "--state-root", f"{root}/state", "r1"], root)
             return {"kill": how, "rollback_rc": rc, **outcome(fixture, root, "r1")}
         failures += compare(f"{fixture.name}: rollback killed at {step}", fixture, each_impl("crash-rb", body), "rollback")
-    return failures, len(steps) + len(rollback_steps)
+    return failures, len(steps) + len(rollback_steps) + len(total_extra)
 
 
 def fallback_matrix():

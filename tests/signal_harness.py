@@ -6,7 +6,8 @@ descendants, and the harness signals the tool (or lets the worker exit
 with stray workers left). For both implementations it requires the state
 lock to stay held until the command group has stopped, no descendant to
 outlive the run, no process to hold the worker's output file open, and
-the same exit code from both.
+the same exit code from both. A retire while another process holds the
+state lock must be refused and leave the module file.
 
     TOOL_BIN=zig-out/bin/eb-staged-rebuild python3 tests/signal_harness.py
 """
@@ -186,6 +187,28 @@ def group_exit(impl, root, interrupt):
                 pass
 
 
+def lock_held(impl, root):
+    """retire while another process holds the state lock: refused, module kept."""
+    fixture(root, "")
+    module = os.path.join(root, "modules", "all", "demo", "1.lua")
+    before = open(module).read()
+    lock = FileLock(os.path.join(root, "state"))
+    lock.acquire()
+    try:
+        done = subprocess.run(
+            command(impl) + ["retire", "--state-root", f"{root}/state", "--module-file", module],
+            env=dict(os.environ, PYTHONPATH=REPO), cwd=root, capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        lock.release()
+    problems = []
+    if "lock" not in done.stderr + done.stdout:
+        problems.append(f"no lock in the refusal: {done.stderr.strip()!r}")
+    if not os.path.exists(module) or open(module).read() != before:
+        problems.append("module file changed")
+    return done.returncode, problems
+
+
 def main():
     if not os.environ.get("TOOL_BIN"):
         print("set TOOL_BIN", file=sys.stderr)
@@ -199,6 +222,8 @@ def main():
          lambda impl, root: group_exit(impl, root, False), None),
         ("SIGTERM with stray workers: run returns after every worker exited",
          lambda impl, root: group_exit(impl, root, True), 128 + signal.SIGTERM),
+        ("retire while the state lock is held: refused, module kept",
+         lock_held, 2),
     ]
     failures = 0
     for label, body, expected in cases:
