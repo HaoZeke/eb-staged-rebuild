@@ -70,6 +70,9 @@ pub const RunError = error{ Refused, CannotStart, ExecFailed };
 
 /// The errno of the last execve that failed in the child (error.ExecFailed).
 pub var exec_errno: linux.E = .SUCCESS;
+/// The step a test made fail before the command started (error.ExecFailed
+/// with EIO), so callers can give Python's "injected failure at STEP".
+pub var injected_at: ?[]const u8 = null;
 
 /// The text Python's OSError gives for an errno execve returns.
 pub fn strerror(e: linux.E) []const u8 {
@@ -92,7 +95,12 @@ pub fn strerror(e: linux.E) []const u8 {
 /// that cannot be executed gives error.ExecFailed with its errno in
 /// `exec_errno`, as Python's Popen raises OSError in the parent.
 pub fn runCommand(a: Allocator, exe: []const u8, argv: []const []const u8, envp: common.proc.Envp, faults: atomic.Faults, step: []const u8) RunError!u8 {
-    faults.reach(step);
+    injected_at = null;
+    if (faults.fails(step)) {
+        injected_at = step;
+        exec_errno = .IO;
+        return error.ExecFailed;
+    }
     if (fsx.statAt(fsx.cwd, "/proc/self/stat", true)) |_| {} else |_| return error.Refused;
     const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch return error.CannotStart;
     for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch return error.CannotStart).ptr;

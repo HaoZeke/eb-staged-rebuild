@@ -28,7 +28,10 @@ const cli = common.cli;
 const Allocator = std.mem.Allocator;
 const Py = json.Py;
 
-pub const E = error{ Refused, NeedsIntervention, OutOfMemory };
+/// Refused and NeedsIntervention are the Python tool's own errors; Os is an
+/// OSError it does not catch on the way up, which the command line reports
+/// the same way (exit 2) but which leaves the journal as it was.
+pub const E = error{ Refused, NeedsIntervention, Os, OutOfMemory };
 
 fn log(comptime f: []const u8, args: anytype) void {
     cli.out("eb-staged-rebuild: " ++ f ++ "\n", args);
@@ -57,6 +60,10 @@ pub const R = struct {
 
     fn refuse(r: *R, comptime f: []const u8, args: anytype) E {
         return r.fail(error.Refused, f, args);
+    }
+
+    fn osFail(r: *R, comptime f: []const u8, args: anytype) E {
+        return r.fail(error.Os, f, args);
     }
 
     fn intervene(r: *R, comptime f: []const u8, args: anytype) E {
@@ -140,10 +147,20 @@ fn sha(a: Allocator, data: []const u8) []const u8 {
     return a.dupe(u8, &hex) catch "";
 }
 
+/// Reach `step`; a step a test made fail is refused with the text of
+/// Python's OSError(EIO, "injected failure at STEP").
+fn hit(r: *R, faults: atomic.Faults, step: []const u8) E!void {
+    if (faults.fails(step)) return r.osFail("[Errno 5] injected failure at {s}", .{step});
+}
+
 fn write(r: *R, path: []const u8, data: []const u8, step: []const u8, metadata_from: ?[]const u8, faults: atomic.Faults) E!void {
     var why: atomic.Why = .{};
-    atomic.atomicWrite(r.a, path, data, .{ .faults = faults, .step = step, .metadata_from = metadata_from }, &why) catch |err|
-        return if (err == error.Refused) r.refuse("{s}", .{why.msg}) else r.refuse("{s}", .{main_mod.osError(r.a, err, path)});
+    // atomic_write raises Refused for what it refuses and OSError for what
+    // the system refused; a failure a test injected carries OSError's text.
+    atomic.atomicWrite(r.a, path, data, .{ .faults = faults, .step = step, .metadata_from = metadata_from }, &why) catch |err| {
+        if (err == error.Refused and !std.mem.startsWith(u8, why.msg, "[Errno ")) return r.refuse("{s}", .{why.msg});
+        return r.osFail("{s}", .{if (err == error.Refused) why.msg else main_mod.osError(r.a, err, path)});
+    };
 }
 
 fn saveJournal(r: *R, path: []const u8, step: []const u8, faults: atomic.Faults) E!void {
@@ -320,7 +337,7 @@ fn build(r: *R) E!u8 {
     const gen = r.str("generation_root");
     atomic.makedirs(gen) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, gen)});
     try removeGenerationModules(r, gen);
-    r.faults().reach("build.start");
+    try hit(r, r.faults(), "build.start");
     const filtered = engine.ensureRebuild(a, engine.filterEbArgs(a, r.spec.eb_args));
     var cmd: std.ArrayList([]const u8) = .empty;
     var envp: common.proc.Envp = undefined;
@@ -353,9 +370,12 @@ fn build(r: *R) E!u8 {
     const rc = builders.runCommand(a, exe, cmd.items, envp, r.faults(), "build.invoke") catch |err| switch (err) {
         error.Refused => return r.refuse("external commands require /proc to confirm their process group stopped", .{}),
         error.CannotStart => return r.refuse("could not start {s}", .{cmd.items[0]}),
-        error.ExecFailed => return r.refuse("[Errno {d}] {s}: '{s}'", .{ @backingInt(builders.exec_errno), builders.strerror(builders.exec_errno), cmd.items[0] }),
+        error.ExecFailed => if (builders.injected_at) |st|
+            return r.refuse("[Errno 5] injected failure at {s}", .{st})
+        else
+            return r.refuse("[Errno {d}] {s}: '{s}'", .{ @backingInt(builders.exec_errno), builders.strerror(builders.exec_errno), cmd.items[0] }),
     };
-    r.faults().reach("build.finish");
+    try hit(r, r.faults(), "build.finish");
     r.set("eb_returncode", .{ .int = rc });
     return rc;
 }
@@ -662,7 +682,7 @@ fn prepareSwapSource(r: *R, m: Py, run_id: []const u8) E!void {
     const sk = kind(staged);
     const rk = kind(retired);
     if (std.mem.eql(u8, sk, "dir") and std.mem.eql(u8, rk, "missing")) {
-        r.faults().reach(try std.fmt.allocPrint(r.a, "stage.move:{s}", .{s(pyfmt.get(m, "rel"))}));
+        try hit(r, r.faults(), try std.fmt.allocPrint(r.a, "stage.move:{s}", .{s(pyfmt.get(m, "rel"))}));
         try moveSealed(r, staged, retired);
         atomic.fsyncDir(std.fs.path.dirname(retired) orelse "/") catch {};
     } else if (!(std.mem.eql(u8, sk, "missing") and std.mem.eql(u8, rk, "dir"))) {
@@ -719,7 +739,7 @@ fn restoreOldModule(r: *R, m: Py, faults: atomic.Faults) E!void {
     }
     if (std.mem.eql(u8, k, "missing")) return;
     if (std.mem.eql(u8, k, "file") and std.mem.eql(u8, try fileHash(r, live), s(pyfmt.get(m, "new_hash")))) {
-        faults.reach(try std.fmt.allocPrint(a, "restore.remove:{s}", .{rel}));
+        try hit(r, faults, try std.fmt.allocPrint(a, "restore.remove:{s}", .{rel}));
         sys.unlinkat(fsx.cwd, live, 0) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, live)});
         atomic.fsyncDir(std.fs.path.dirname(live) orelse "/") catch {};
         return;
@@ -752,7 +772,7 @@ fn createLinks(r: *R, faults: atomic.Faults) E!void {
         const parent = std.fs.path.dirname(path) orelse "/";
         if (symlinkComponent(a, parent)) |c| return r.refuse("{s} is a symlink", .{c});
         atomic.makedirs(parent) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, parent)});
-        faults.reach(try std.fmt.allocPrint(a, "links.create:{s}", .{s(pyfmt.get(l, "rel"))}));
+        try hit(r, faults, try std.fmt.allocPrint(a, "links.create:{s}", .{s(pyfmt.get(l, "rel"))}));
         var zt: [sys.path_max:0]u8 = undefined;
         var zp: [sys.path_max:0]u8 = undefined;
         const zt_ = sys.z(&zt, target) catch return r.refuse("bad link target", .{});
@@ -923,6 +943,7 @@ fn preparePublication(r: *R) E!u8 {
     log("preparing publication permissions: {s} {s}", .{ exe, context_path });
     const rc = builders.runCommand(a, exe, &.{ exe, context_path }, r.env.envp, r.faults(), "prepare.invoke") catch |err| {
         if (err == error.Refused) return r.refuse("external commands require /proc to confirm their process group stopped", .{});
+        if (builders.injected_at) |st| return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno 5] injected failure at {s}", .{st}), 2);
         const e: linux.E = if (err == error.ExecFailed) builders.exec_errno else .NOENT;
         return preparationFailure(r, try std.fmt.allocPrint(a, "publication preparation failed: [Errno {d}] {s}: '{s}'", .{ @backingInt(e), builders.strerror(e), exe }), 2);
     };
@@ -1334,7 +1355,7 @@ fn rollbackSteps(r: *R) E!void {
         if (!pyfmt.truthy(pyfmt.get(l, "created"))) continue;
         const path = s(pyfmt.get(l, "live_path"));
         if (isKind(path, "symlink") and std.mem.eql(u8, readlinkText(a, path), s(pyfmt.get(l, "target")))) {
-            r.faults().reach(try std.fmt.allocPrint(a, "rollback.unlink:{s}", .{s(pyfmt.get(l, "rel"))}));
+            try hit(r, r.faults(), try std.fmt.allocPrint(a, "rollback.unlink:{s}", .{s(pyfmt.get(l, "rel"))}));
             sys.unlinkat(fsx.cwd, path, 0) catch {};
             atomic.fsyncDir(std.fs.path.dirname(path) orelse "/") catch {};
         }

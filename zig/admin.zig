@@ -112,13 +112,22 @@ fn reachStep(ctx: ?*anyopaque, step: []const u8) void {
     _ = linux.nanosleep(&ts, null);
 }
 
+/// Fail a step the tests name in EB_STAGED_REBUILD_FAIL_AT, as the Python
+/// fault injector raises OSError(EIO) there. Only a replaceable build (the
+/// -Dtest-ops artifact) asks; Faults.fails never calls it otherwise.
+fn failStep(ctx: ?*anyopaque, step: []const u8) bool {
+    const c: *const PauseCtx = @ptrCast(@alignCast(ctx.?));
+    const token = c.env.get("EB_STAGED_REBUILD_FAIL_AT") orelse return false;
+    return std.mem.eql(u8, token, step);
+}
+
 pub const Ctx = struct {
     a: Allocator,
     env: probe.Env,
     pause: PauseCtx,
 
     pub fn faults(c: *Ctx) atomic.Faults {
-        return .{ .ctx = &c.pause, .reach_fn = reachStep };
+        return .{ .ctx = &c.pause, .reach_fn = reachStep, .fail_fn = if (atomic.replaceable) failStep else null };
     }
 };
 
@@ -239,13 +248,15 @@ fn statDev(c: *Ctx, p: []const u8) u64 {
 /// Rename `source` onto `destination` once the file's bytes are durable.
 fn move(c: *Ctx, source: []const u8, destination: []const u8, step: []const u8) void {
     const f = c.faults();
-    f.reach(std.fmt.allocPrint(c.a, "{s}.fsync", .{step}) catch step);
+    const fsync_step = std.fmt.allocPrint(c.a, "{s}.fsync", .{step}) catch step;
+    if (f.fails(fsync_step)) refuse("[Errno 5] injected failure at {s}", .{fsync_step});
     {
         const fd = sys.openat(fsx.cwd, source, .{}, 0) catch |err| refuse("{s}", .{main_mod.osError(c.a, err, source)});
         defer sys.close(fd);
         sys.fsync(fd) catch |err| refuse("{s}", .{main_mod.osError(c.a, err, source)});
     }
-    f.reach(std.fmt.allocPrint(c.a, "{s}.rename", .{step}) catch step);
+    const rename_step = std.fmt.allocPrint(c.a, "{s}.rename", .{step}) catch step;
+    if (f.fails(rename_step)) refuse("[Errno 5] injected failure at {s}", .{rename_step});
     sys.renameat(fsx.cwd, source, fsx.cwd, destination) catch |err| switch (err) {
         error.CrossDevice => refuse("{s} and {s} are on different filesystems", .{ source, destination }),
         else => refuse("{s}", .{main_mod.osError(c.a, err, source)}),

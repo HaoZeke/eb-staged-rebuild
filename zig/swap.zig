@@ -27,6 +27,16 @@ fn fail(a: Allocator, why: *Why, comptime kind: Error, comptime f: []const u8, a
     return kind;
 }
 
+/// A step a test made fail: Python's OSError(EIO, "injected failure at STEP").
+fn injectedText(a: Allocator, step: []const u8) []const u8 {
+    return std.fmt.allocPrint(a, "[Errno 5] injected failure at {s}", .{step}) catch "swap failed";
+}
+
+fn injected(a: Allocator, why: *Why, step: []const u8) Error {
+    why.msg = injectedText(a, step);
+    return error.Failed;
+}
+
 fn kindOf(p: []const u8) []const u8 {
     return main_mod.lstatKind(p);
 }
@@ -127,11 +137,13 @@ pub fn swapDirectories(a: Allocator, live_in: []const u8, staged_in: []const u8,
         if (!std.mem.eql(u8, k, "dir")) return fail(a, why, error.Refused, "{s} swap path is {s}, not a real directory: {s}", .{ pair[0], k, pair[1] });
     }
     if (allow_exchange) {
-        faults.reach(std.fmt.allocPrint(a, "{s}.exchange.before", .{step_prefix}) catch step_prefix);
+        const before = std.fmt.allocPrint(a, "{s}.exchange.before", .{step_prefix}) catch step_prefix;
+        if (faults.fails(before)) return injected(a, why, before);
         const e = exchange(a, live, staged);
         if (e == .SUCCESS) {
-            faults.reach(std.fmt.allocPrint(a, "{s}.exchange.after", .{step_prefix}) catch step_prefix);
-            syncParent(a, live, why) catch |err| {
+            const after = std.fmt.allocPrint(a, "{s}.exchange.after", .{step_prefix}) catch step_prefix;
+            const synced = if (faults.fails(after)) injected(a, why, after) else syncParent(a, live, why);
+            synced catch |err| {
                 // Undo the exchange before reporting the failure.
                 if (exchange(a, live, staged) != .SUCCESS)
                     return fail(a, why, error.NeedsIntervention, "RENAME_EXCHANGE succeeded but its rollback failed for {s}: {s}", .{ live, why.msg });
@@ -145,11 +157,23 @@ pub fn swapDirectories(a: Allocator, live_in: []const u8, staged_in: []const u8,
     const hold = std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{staged}) catch return error.Failed;
     if (!std.mem.eql(u8, kindOf(hold), "missing")) try recoverInterrupted(a, live, staged, why);
     fallback: {
-        faults.reach(std.fmt.allocPrint(a, "{s}.fallback.live-to-hold", .{step_prefix}) catch step_prefix);
+        const live_to_hold = std.fmt.allocPrint(a, "{s}.fallback.live-to-hold", .{step_prefix}) catch step_prefix;
+        if (faults.fails(live_to_hold)) {
+            why.msg = injectedText(a, live_to_hold);
+            break :fallback;
+        }
         renamePath(a, live, hold, why) catch break :fallback;
-        faults.reach(std.fmt.allocPrint(a, "{s}.fallback.staged-to-live", .{step_prefix}) catch step_prefix);
+        const staged_to_live = std.fmt.allocPrint(a, "{s}.fallback.staged-to-live", .{step_prefix}) catch step_prefix;
+        if (faults.fails(staged_to_live)) {
+            why.msg = injectedText(a, staged_to_live);
+            break :fallback;
+        }
         renamePath(a, staged, live, why) catch break :fallback;
-        faults.reach(std.fmt.allocPrint(a, "{s}.fallback.hold-to-staged", .{step_prefix}) catch step_prefix);
+        const hold_to_staged = std.fmt.allocPrint(a, "{s}.fallback.hold-to-staged", .{step_prefix}) catch step_prefix;
+        if (faults.fails(hold_to_staged)) {
+            why.msg = injectedText(a, hold_to_staged);
+            break :fallback;
+        }
         renamePath(a, hold, staged, why) catch break :fallback;
         syncParent(a, live, why) catch break :fallback;
         return .@"rename-fallback";
