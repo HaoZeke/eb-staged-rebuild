@@ -5,6 +5,7 @@
 //! files. Every step is journaled before it happens; a failure while
 //! publishing puts the old live trees back.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const main_mod = @import("main.zig");
@@ -99,8 +100,11 @@ pub const R = struct {
         try saveJournal(r, r.path, step, r.faults());
     }
 
-    fn saveSilently(r: *R, step: []const u8) E!void {
-        try saveJournal(r, r.path, step, .{});
+    /// The journal save on a restore path. Python passes a fresh
+    /// FaultInjector() there, which records no steps but still reads the
+    /// environment's pause and fail hooks; so does this.
+    fn saveRestore(r: *R, step: []const u8) E!void {
+        try saveJournal(r, r.path, step, r.faults());
     }
 };
 
@@ -109,11 +113,11 @@ fn dictSet(a: Allocator, d: Py, key: []const u8, value: Py) Py {
     var found = false;
     if (d == .dict) for (d.dict) |e| {
         if (std.mem.eql(u8, e.key, key)) {
-            out.append(a, .{ .key = e.key, .value = value }) catch {};
+            out.append(a, .{ .key = e.key, .value = value }) catch oom();
             found = true;
-        } else out.append(a, e) catch {};
+        } else out.append(a, e) catch oom();
     };
-    if (!found) out.append(a, .{ .key = key, .value = value }) catch {};
+    if (!found) out.append(a, .{ .key = key, .value = value }) catch oom();
     return .{ .dict = out.items };
 }
 
@@ -267,8 +271,8 @@ fn relsFromDryRun(a: Allocator, text: []const u8) []const []const u8 {
         if (std.mem.indexOf(u8, field, " | ")) |bar| {
             const sub = std.mem.trim(u8, field[0..bar], " \t");
             const short = std.mem.trim(u8, field[bar + 3 ..], " \t");
-            rels.append(a, std.fs.path.join(a, &.{ sub, short }) catch continue) catch {};
-        } else rels.append(a, field) catch {};
+            rels.append(a, std.fs.path.join(a, &.{ sub, short }) catch continue) catch oom();
+        } else rels.append(a, field) catch oom();
     }
     return rels.items;
 }
@@ -879,7 +883,8 @@ fn publish(r: *R) E!void {
         };
         r.set("state", Py.s("built"));
         r.set("message", Py.s("publish interrupted; old live tree restored"));
-        r.saveSilently("journal.restored") catch {};
+        // As in Python, a failure to record the restore replaces the error.
+        try r.saveRestore("journal.restored");
         r.why = first;
         return kind_err;
     };
@@ -1176,9 +1181,9 @@ fn usable(probes: Py, key: []const u8) bool {
 /// The spec a journal records, for resume and rollback.
 fn specFromJournal(a: Allocator, j: Py, lock_timeout: ?f64) engine.Spec {
     var rels: std.ArrayList([]const u8) = .empty;
-    if (pyfmt.get(j, "module_rels")) |v| if (v == .list) for (v.list) |x| if (x == .str) rels.append(a, x.str) catch {};
+    if (pyfmt.get(j, "module_rels")) |v| if (v == .list) for (v.list) |x| if (x == .str) rels.append(a, x.str) catch oom();
     var args: std.ArrayList([]const u8) = .empty;
-    if (pyfmt.get(j, "eb_args")) |v| if (v == .list) for (v.list) |x| if (x == .str) args.append(a, x.str) catch {};
+    if (pyfmt.get(j, "eb_args")) |v| if (v == .list) for (v.list) |x| if (x == .str) args.append(a, x.str) catch oom();
     const grace = pyfmt.get(j, "grace_hours");
     return .{
         .software = s(pyfmt.get(j, "software")),
@@ -1295,7 +1300,8 @@ pub fn rollbackRun(r: *R) E!Result {
         restorePublished(r) catch return r.intervene("rollback failed and the published tree could not be restored: {s}", .{r.why});
         r.set("state", Py.s("complete"));
         r.set("message", Py.s("rollback interrupted; published tree restored"));
-        r.saveSilently("journal.rollback-restored") catch {};
+        r.saveRestore("journal.rollback-restored") catch
+            return r.intervene("rollback failed and the published tree could not be restored: {s}", .{r.why});
         r.why = first;
         return err;
     };
