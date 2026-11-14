@@ -8,7 +8,7 @@ set -u
 : "${TOOL_BIN:?}"
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/esr-diff.XXXXXX")
-trap 'rm -rf -- "${work}"' EXIT
+trap 'chmod -R u+rwX "${work}" 2>/dev/null; rm -rf -- "${work}"' EXIT
 diffs=0
 
 compare() {
@@ -52,6 +52,11 @@ compare "resolve relative" resolve modules/lua.lua
 compare "resolve, no argument" resolve
 compare "resolve, two arguments" resolve a b
 compare "resolve -h" resolve -h
+if [ "$(id -u)" != 0 ]; then
+    cp "${m}/lua.lua" "${m}/unreadable.lua"; chmod 0 "${m}/unreadable.lua"
+    compare "resolve an unreadable file" resolve "${m}/unreadable.lua"
+    rm -f "${m}/unreadable.lua"
+fi
 
 # Journals.
 st="${work}/state"
@@ -159,6 +164,19 @@ fixture() {
     mkdir -p "${root}/bin"
     printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "bubblewrap 0.11.0"; exit 0; fi\nif [ -n "${FAKE_BWRAP_FAIL:-}" ]; then echo "setting up uid map: Permission denied (user namespaces disabled)" >&2; exit 1; fi\nexit 0\n' > "${root}/bin/bwrap"
     chmod +x "${root}/bin/bwrap"
+    # Two modules for the publication barrier, and policies that see their
+    # context: two remove the second generation's PAYLOAD and then disable
+    # or make unreadable its easybuild directory, the remaining evidence;
+    # one keeps a copy of the context and restricts each staged tree.
+    for mod in alpha beta; do
+        mkdir -p "${root}/software/${mod}/1/easybuild" "${root}/modules/all/${mod}"
+        touch "${root}/software/${mod}/1/easybuild/${mod}-1.eb"
+        printf 'local root = "software/%s/1"\n' "${mod}" > "${root}/modules/all/${mod}/1.lua"
+    done
+    printf '#!%s\nimport json, os, sys\nfor m in json.load(open(sys.argv[1]))["modules"]:\n    if m["rel"] == "all/beta/1.lua":\n        os.unlink(os.path.join(m["generation"], "PAYLOAD"))\n        os.rename(os.path.join(m["generation"], "easybuild"), os.path.join(m["generation"], "disabled-metadata"))\n' "$(command -v python3)" > "${root}/prepare-barrier-rename"
+    printf '#!%s\nimport json, os, sys\nfor m in json.load(open(sys.argv[1]))["modules"]:\n    if m["rel"] == "all/beta/1.lua":\n        os.unlink(os.path.join(m["generation"], "PAYLOAD"))\n        os.chmod(os.path.join(m["generation"], "easybuild"), 0)\n' "$(command -v python3)" > "${root}/prepare-barrier-chmod"
+    printf '#!%s\nimport json, os, shutil, sys\nshutil.copyfile(sys.argv[1], "%s/context.json")\nfor m in json.load(open(sys.argv[1]))["modules"]:\n    os.chmod(m["staged"], 0o750)\n' "$(command -v python3)" "${root}" > "${root}/prepare-context"
+    chmod +x "${root}/prepare-barrier-rename" "${root}/prepare-barrier-chmod" "${root}/prepare-context"
 }
 compare_admin() {
     local label=$1; shift
@@ -173,8 +191,13 @@ compare_admin() {
         local bev=0
         for a in "$@"; do [ "${a}" = build-events ] && bev=1; done
         if [ "${bev}" = 1 ] && [ "${impl}" = py ]; then cmd=(env PYTHONPATH="${repo_root}" python3 -m eb_staged_rebuild.build_events); fi
-        # The newest retire record; names sort by time.
-        rid=$(cd "${root}/state/runs" 2>/dev/null && ls -d retire-* 2>/dev/null | tail -1)
+        # The retire record the last successful retire created. Names sort
+        # by the second only, so two retires in one second do not order by
+        # name the same way in both copies.
+        rid=$(cat "${root}/.last-retire" 2>/dev/null)
+        local -a before=() after=()
+        local d
+        for d in "${root}"/state/runs/retire-*; do [ -e "${d}" ] && before+=("${d##*/}"); done
         for a in "$@"; do
             if [ "${a}" = build-events ] && [ "${impl}" = py ]; then continue; fi
             a="${a//@ROOT@/${root}}"
@@ -186,9 +209,20 @@ compare_admin() {
             (cd "${root}" && "${cmd[@]}" "${args[@]}") > "${out}.out" 2> "${out}.err"
         fi
         echo $? > "${out}.rc"
-        find "${root}" -name journal.json -print0 2>/dev/null | sort -z | xargs -0 -r cat > "${out}.journals"
-        (cd "${root}" && find . -not -name '.lock*' 2>/dev/null | sort) > "${out}.tree"
-        for f in out err journals tree; do norm < "${out}.${f}" > "${out}.${f}.n"; done
+        for d in "${root}"/state/runs/retire-*; do
+            [ -e "${d}" ] || continue
+            [[ " ${before[*]} " == *" ${d##*/} "* ]] || after+=("${d##*/}")
+        done
+        [ "${#after[@]}" -gt 0 ] && echo "${after[-1]}" > "${root}/.last-retire"
+        # Ordered by run directory: by path, "retire-STAMP-2/journal.json"
+        # sorts before "retire-STAMP/journal.json".
+        find "${root}" -name journal.json -printf '%h\0' 2>/dev/null | LC_ALL=C sort -z |
+            while IFS= read -r -d '' d; do cat "${d}/journal.json"; done > "${out}.journals"
+        (cd "${root}" && find . -not -name '.lock*' -not -name .last-retire 2>/dev/null) > "${out}.tree"
+        for f in out err journals; do norm < "${out}.${f}" > "${out}.${f}.n"; done
+        # Sorted after normalizing, so names that differ only in a stamp
+        # compare by what is left.
+        norm < "${out}.tree" | LC_ALL=C sort > "${out}.tree.n"
     done
     for f in rc out.n err.n journals.n tree.n; do
         if ! cmp -s "${work}/py.admin.${f}" "${work}/zig.admin.${f}"; then
@@ -304,6 +338,26 @@ for impl in py zig; do cp "${work}/${impl}/prepare-ok" "${work}/${impl}/prepare-
 compare_admin "resume after the prepare is fixed" resume --state-root @ROOT@/state r12
 compare_admin "the prepare ran once" env cat @ROOT@/prepare-count
 compare_admin "rollback a prepared run" rollback --state-root @ROOT@/state r12
+# The publication barrier: a policy that leaves the second of two staged
+# generations without build evidence, or unreadable, publishes neither.
+pr='--software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --skip-live-check'
+# shellcheck disable=SC2086
+compare_admin "run, prepare barrier, second generation incomplete" env FAKE_EB_RELS=alpha/1,beta/1 @CMD@ run ${pr} --run-id p1 --prepare @ROOT@/prepare-barrier-rename --module alpha/1 --module beta/1 -- alpha-1.eb
+# shellcheck disable=SC2086
+compare_admin "run, prepare barrier, second generation unreadable" env FAKE_EB_RELS=alpha/1,beta/1 @CMD@ run ${pr} --run-id p2 --prepare @ROOT@/prepare-barrier-chmod --module alpha/1 --module beta/1 -- alpha-1.eb
+for impl in py zig; do chmod -R u+rwX "${work}/${impl}/state/generations/p2"; done
+compare_admin "module files after the barrier" env cat @ROOT@/modules/all/alpha/1.lua @ROOT@/modules/all/beta/1.lua
+# A policy sees the publication context and restricts the staged tree
+# before the module file changes.
+# shellcheck disable=SC2086
+compare_admin "run, prepare restricts the staged tree" run ${pr} --run-id p3 --prepare @ROOT@/prepare-context --module demo/1 -- demo-1.eb
+compare_admin "the context the prepare saw" env cat @ROOT@/context.json
+compare_admin "modes after a restricting prepare" env sh -c 'cd "$1" && find . -printf "%m %p\n" | sort' sh @ROOT@/software/demo/1
+# A published module retired: gc removes the hidden sibling and leaves the
+# live tree for the operator.
+compare_admin "retire a published module" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo/1.lua
+compare_admin "gc after a published module is retired" gc --state-root @ROOT@/state --grace-hours 0
+compare_admin "rollback the published module retire" rollback --state-root @ROOT@/state @RETIRE@
 unset NORM_HASH
 
 # The live-tree snapshot a journal records, compared as JSON.
