@@ -115,13 +115,16 @@ fn reachStep(ctx: ?*anyopaque, step: []const u8) void {
     _ = linux.nanosleep(&ts, null);
 }
 
-/// Fail a step the tests name in EB_STAGED_REBUILD_FAIL_AT, as the Python
-/// fault injector raises OSError(EIO) there. Only a replaceable build (the
-/// -Dtest-ops artifact) asks; Faults.fails never calls it otherwise.
+/// Fail each step the tests name in EB_STAGED_REBUILD_FAIL_AT (a
+/// comma-separated list), as the Python fault injector raises OSError(EIO)
+/// there. Only a replaceable build (the -Dtest-ops artifact) asks;
+/// Faults.fails never calls it otherwise.
 fn failStep(ctx: ?*anyopaque, step: []const u8) bool {
     const c: *const PauseCtx = @ptrCast(@alignCast(ctx.?));
     const token = c.env.get("EB_STAGED_REBUILD_FAIL_AT") orelse return false;
-    return std.mem.eql(u8, token, step);
+    var it = std.mem.splitScalar(u8, token, ',');
+    while (it.next()) |name| if (std.mem.eql(u8, name, step)) return true;
+    return false;
 }
 
 pub const Ctx = struct {
