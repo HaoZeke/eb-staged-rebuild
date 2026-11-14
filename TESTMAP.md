@@ -408,3 +408,45 @@ it writes, with ids, times and the state root's scope normalized.
 | test | replacement |
 |---|---|
 | RealEbStackLedgerTests.test_append_recovery_and_idempotence | `tests/test_ledger_eb_stack_cli.py` CliEbStackLedgerTests.test_append_recovery_and_idempotence (a real eb-stack; the run is killed with SIGKILL at `ledger.acked:*`, resumed twice, rolled back twice; Python and the binary) |
+
+## tests/test_build_events.py (`build-events`)
+
+`Case.cli` and `Case.popen` run `TOOL_BIN build-events` when `TOOL_BIN` is set, so every test that drives the command runs
+unchanged against the binary (CI: "build events and the bounded ledger call against the binary"; the real-ledger class
+needs `EB_STACK_BIN`). The tests that call `build_events` in process run their same bodies through the command in
+`tests/test_build_events_cli.py`: a crash pauses the command at the step the Python recorder lists
+(`EB_STAGED_REBUILD_PAUSE_AT`) and kills it with SIGKILL; a refusal is exit 2 with the message on stderr.
+
+| test | replacement |
+|---|---|
+| test_build_events.LifecycleTests.test_started_is_in_the_ledger_before_the_command_and_finished_after | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_command_failure_records_aborted_and_keeps_its_status | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_failure_with_a_lost_aborted_ack_keeps_the_command_status_and_names_the_ledger_error | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_success_with_a_lost_finished_ack_is_not_reported_as_success | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_missing_executable_is_aborted_not_started | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_outputs_that_do_not_check_turn_a_zero_exit_into_aborted | runs against `TOOL_BIN` |
+| test_build_events.LifecycleTests.test_optional_mode_runs_the_command_and_keeps_events_pending | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_lost_started_ack_blocks_the_command_until_a_retry_is_acknowledged | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_crash_before_and_after_the_append_is_retried_with_the_same_bytes | `tests/test_build_events_cli.py` CrashCliTests.test_crash_before_and_after_the_append_is_retried_with_the_same_bytes (the same test body; pauses at the step and SIGKILLs the command) |
+| test_build_events.AcknowledgementTests.test_exact_replay_appends_nothing_and_does_not_rerun | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_changed_metadata_is_refused_before_anything_is_appended | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_reused_operation_with_another_payload_is_refused_by_the_ledger | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_tampered_outbox_record_is_never_acknowledged | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_unreachable_ledger_blocks_the_command | runs against `TOOL_BIN` |
+| test_build_events.AcknowledgementTests.test_crash_at_every_step_converges_without_duplicates_or_early_commands | `tests/test_build_events_cli.py` CrashCliTests.test_crash_at_every_step_converges_without_duplicates_or_early_commands (the same test body; pauses at the step and SIGKILLs the command) |
+| test_build_events.ProcessTests.test_interrupted_command_is_aborted_after_its_whole_group_stopped | runs against `TOOL_BIN` |
+| test_build_events.ProcessTests.test_interrupt_during_started_delivery_stops_the_ledger_group_and_never_runs_the_command | runs against `TOOL_BIN` |
+| test_build_events.ProcessTests.test_producer_killed_during_the_command_is_recorded_as_unknown_and_not_rerun | runs against `TOOL_BIN` |
+| test_build_events.ProcessTests.test_a_second_writer_of_the_same_operation_is_refused_while_the_first_holds_it | runs against `TOOL_BIN` |
+| test_build_events.ProcessTests.test_environment_and_arguments_are_never_serialized | runs against `TOOL_BIN` |
+| test_build_events.UnsafeInputTests.test_unsafe_configuration_is_refused_before_anything_is_written | `tests/test_build_events_cli.py` UnsafeInputCliTests.test_unsafe_configuration_is_refused_before_anything_is_written (the same test body; the command's exit 2 and stderr) |
+| test_build_events.UnsafeInputTests.test_unsafe_metadata_is_refused | `tests/test_build_events_cli.py` UnsafeInputCliTests.test_unsafe_metadata_is_refused (the same test body; the command's exit 2 and stderr) |
+| test_build_events.UnsafeInputTests.test_symlinked_operation_directory_is_refused | runs against `TOOL_BIN` |
+| test_build_events.UnsafeInputTests.test_a_call_off_the_main_thread_is_refused_before_started_is_appended | no command-line form: it guards Python's `run_build` API, whose stop handlers need the main thread; the binary is single-threaded and installs them in `main` |
+| test_build_events.UnsafeInputTests.test_oversized_metadata_is_refused | runs against `TOOL_BIN` |
+| test_build_events.UnsafeInputTests.test_cli_needs_exactly_one_of_a_command_and_deliver | runs against `TOOL_BIN` |
+| test_build_events.RealLedgerTests.test_clean_run_is_verified_by_inclusion_proofs | runs against `TOOL_BIN` |
+| test_build_events.RealLedgerTests.test_lost_ack_before_the_append_blocks_and_retries | runs against `TOOL_BIN` |
+| test_build_events.RealLedgerTests.test_lost_ack_after_the_append_is_replayed_once | runs against `TOOL_BIN` |
+| test_build_events.RealLedgerTests.test_exact_replay_and_changed_payload_against_the_real_ledger | runs against `TOOL_BIN` |
+| test_build_events.RealLedgerTests.test_independent_writers_share_one_ledger | runs against `TOOL_BIN` |
