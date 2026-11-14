@@ -204,25 +204,32 @@ fn runDir(a: Allocator, state_root: []const u8, run_id: []const u8) []const u8 {
 // ---- the environment eb runs with -------------------------------------------
 
 /// child_env: the install-path and ghost-removal variables replaced, and the
-/// live module tree first on MODULEPATH.
-fn childEnv(a: Allocator, env: probe.Env, software: []const u8, modules: []const u8, live_modules: []const u8) common.proc.Envp {
-    var b = common.env.Builder.fromEnv(a, common.env.Env.fromEnvp(env.envp)) catch return env.envp;
+/// live module tree first on MODULEPATH. Running eb without these would let
+/// it install into its default path, so an allocation failure is an error,
+/// never a fallback to the parent environment.
+fn childEnv(r: *R, env: probe.Env, software: []const u8, modules: []const u8, live_modules: []const u8) E!common.proc.Envp {
+    const a = r.a;
+    var b = try common.env.Builder.fromEnv(a, common.env.Env.fromEnvp(env.envp));
     for ([_][]const u8{ "EASYBUILD_INSTALLPATH", "EASYBUILD_PREFIX", "EASYBUILD_REMOVE_GHOST_INSTALL_DIRS", "EASYBUILD_INSTALLPATH_SOFTWARE", "EASYBUILD_INSTALLPATH_MODULES" }) |k| b.unset(k);
-    b.set("EASYBUILD_INSTALLPATH_SOFTWARE", software) catch {};
-    b.set("EASYBUILD_INSTALLPATH_MODULES", modules) catch {};
+    try b.set("EASYBUILD_INSTALLPATH_SOFTWARE", software);
+    try b.set("EASYBUILD_INSTALLPATH_MODULES", modules);
     const mp = b.get("MODULEPATH") orelse "";
     var parts: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, mp, ':');
     var present = false;
     while (it.next()) |x| if (x.len > 0) {
-        parts.append(a, x) catch {};
+        try parts.append(a, x);
         if (std.mem.eql(u8, x, live_modules)) present = true;
     };
     if (!present) {
-        const joined = if (parts.items.len > 0) std.fmt.allocPrint(a, "{s}:{s}", .{ live_modules, std.mem.join(a, ":", parts.items) catch "" }) catch live_modules else live_modules;
-        b.set("MODULEPATH", joined) catch {};
+        const joined = if (parts.items.len > 0) try std.fmt.allocPrint(a, "{s}:{s}", .{ live_modules, try std.mem.join(a, ":", parts.items) }) else live_modules;
+        try b.set("MODULEPATH", joined);
     }
-    return b.envp() catch env.envp;
+    return b.envp() catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        // Paths come from argv and the environment, which cannot hold NUL.
+        error.InvalidArgument => r.refuse("eb's environment would hold a NUL byte", .{}),
+    };
 }
 
 fn resolveExe(a: Allocator, env: probe.Env, name: []const u8) ?[]const u8 {
@@ -274,7 +281,7 @@ fn learnRels(r: *R) E![]const []const u8 {
     try cmd.appendSlice(a, &.{ r.spec.eb_executable, "--dry-run" });
     try cmd.appendSlice(a, engine.filterEbArgs(a, r.spec.eb_args));
     log("module preflight: {s}", .{joinCmd(a, cmd.items)});
-    const envp = childEnv(a, r.env, r.spec.software, r.spec.modules, r.spec.modules);
+    const envp = try childEnv(r, r.env, r.spec.software, r.spec.modules, r.spec.modules);
     var found: []const []const u8 = &.{};
     var code: u32 = 0;
     var tail: []const u8 = "";
@@ -346,14 +353,14 @@ fn build(r: *R) E!u8 {
     if (std.mem.eql(u8, r.spec.backend, "bwrap")) {
         try cmd.appendSlice(a, &.{ r.spec.eb_executable, "--experimental", "--bwrap", try std.fmt.allocPrint(a, "--bwrap-installpath={s}", .{gen}), "--bwrap-options=--die-with-parent" });
         try cmd.appendSlice(a, filtered);
-        envp = childEnv(a, r.env, r.spec.software, r.spec.modules, r.spec.modules);
+        envp = try childEnv(r, r.env, r.spec.software, r.spec.modules, r.spec.modules);
     } else {
         atomic.makedirs(software) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, software)});
         atomic.makedirs(modules) catch |err| return r.refuse("{s}", .{main_mod.osError(a, err, modules)});
         var inner: std.ArrayList([]const u8) = .empty;
         try inner.appendSlice(a, &.{ r.spec.eb_executable, try std.fmt.allocPrint(a, "--installpath-software={s}", .{software}), try std.fmt.allocPrint(a, "--installpath-modules={s}", .{modules}) });
         try inner.appendSlice(a, filtered);
-        envp = childEnv(a, r.env, software, modules, r.spec.modules);
+        envp = try childEnv(r, r.env, software, modules, r.spec.modules);
         if (std.mem.eql(u8, r.spec.backend, "userns")) {
             const probes = r.get("probes") orelse Py{ .dict = &.{} };
             const unshare = blk: {
@@ -1396,4 +1403,33 @@ test "relsFromDryRun" {
     const rels = relsFromDryRun(a, " * [ ] /x/zlib-1.3.eb (module: zlib/1.3)\n * [x] /x/GCC.eb (module: Core | GCC/13)\nnoise\n * [R] /y.eb (module: a/b) \n");
     try std.testing.expectEqual(@as(usize, 3), rels.len);
     try std.testing.expectEqualStrings("Core/GCC/13", rels[1]);
+}
+
+test "childEnv fails rather than fall back to the parent environment" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const parent: common.proc.Envp = &[_:null]?[*:0]const u8{ "PATH=/bin", "EASYBUILD_PREFIX=/default", "MODULEPATH=/m" };
+    const env: probe.Env = .{ .envp = parent };
+    var ctx: admin.Ctx = .{ .a = arena_state.allocator(), .env = env, .pause = .{ .env = env } };
+    // Every allocation failure point either fails the call or still yields
+    // an environment that names the staged install paths.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(arena_state.allocator(), .{ .fail_index = fail_index });
+        var r: R = .{ .a = failing.allocator(), .env = env, .ctx = &ctx, .spec = .{ .software = "/s", .modules = "/m2", .state_root = "/st", .eb_args = &.{} } };
+        const envp = childEnv(&r, env, "/gen/software", "/gen/modules", "/live/modules") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try std.testing.expect(envp != parent);
+        var saw = false;
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const line = std.mem.span(entry);
+            if (std.mem.eql(u8, line, "EASYBUILD_INSTALLPATH_SOFTWARE=/gen/software")) saw = true;
+            try std.testing.expect(!std.mem.startsWith(u8, line, "EASYBUILD_PREFIX="));
+        }
+        try std.testing.expect(saw);
+        if (!failing.has_induced_failure) break;
+    }
 }
