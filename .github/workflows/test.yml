@@ -86,6 +86,8 @@ jobs:
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" bash tests/differential.sh
       - name: a run and a rollback killed at every step, then resumed
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/crash_matrix.py
+      - name: a run signalled while its build command runs
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/signal_harness.py
       - name: ledger CLI
         uses: ./.github/actions/pinned-ledger
       - name: ledger-maintenance against the Python tool
