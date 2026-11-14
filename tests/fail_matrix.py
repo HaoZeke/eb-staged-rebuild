@@ -98,6 +98,22 @@ def main():
         for step in cm.steps_rollback(fixture):
             failures += check(f"{fixture.name}: rollback fails at {step}", fixture, cm.each_impl("fail-rb", failed_rollback(fixture, step)), "rollback")
             total += 1
+    # A failure whose restore cannot be recorded either: the publish path
+    # reports the journal error, the rollback path needs intervention, and
+    # neither leaves a half-swapped tree.
+    fixture = cm.ONE
+    for step, restore in (
+        ("swap:all/demo/1.lua.exchange.after", "journal.restored.write"),
+        ("rollback.swap:all/demo/1.lua.exchange.after", "journal.rollback-restored.write"),
+    ):
+        both = f"{step},{restore}"
+        if step.startswith("rollback."):
+            results = cm.each_impl("fail-rb2", failed_rollback(fixture, both))
+            failures += check(f"one module: rollback fails at {step} and its restore record", fixture, results, "rollback")
+        else:
+            results = cm.each_impl("fail2", failed_run(fixture, both))
+            failures += check(f"one module: run fails at {step} and its restore record", fixture, results, "run")
+        total += 1
     print(f"{total - failures} of {total} cases match")
     return 1 if failures else 0
 

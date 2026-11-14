@@ -22,10 +22,11 @@ class FaultInjector:
         self.reached.append(step)
         if self.fail_at is not None and step == self.fail_at:
             raise InjectedCrash(step)
-        # A failed operation at a named step, for tests that drive the
-        # command line: the same I/O error the Zig test artifact returns
-        # there. No filename, so str() is "[Errno 5] injected failure at STEP".
-        if os.environ.get("EB_STAGED_REBUILD_FAIL_AT") == step:
+        # A failed operation at each named step (a comma-separated list), for
+        # tests that drive the command line: the same I/O error the Zig test
+        # artifact returns there. No filename, so str() is
+        # "[Errno 5] injected failure at STEP".
+        if step in os.environ.get("EB_STAGED_REBUILD_FAIL_AT", "").split(","):
             raise OSError(errno.EIO, f"injected failure at {step}")
         # A real SIGKILL cannot be injected in-process. Tests set this to
         # pause after the previous step has happened and before this one.
