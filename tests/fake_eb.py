@@ -87,6 +87,11 @@ def _write_tree(software, modules, root_in_module, rel=None):
 
 def main(argv):
     _record(argv)
+    # FAKE_EB_VERSION: answer eb --version as that EasyBuild release does.
+    version = os.environ.get("FAKE_EB_VERSION")
+    if version and "--version" in argv:
+        print(f"This is EasyBuild {version} (framework: {version}, easyblocks: {version}) on host fake.")
+        return 0
     if "--dry-run" in argv:
         print("Dry run: printing build status of easyconfigs")
         for rel in (os.environ.get("FAKE_EB_RELS") or _rel()).split(","):

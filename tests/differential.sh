@@ -154,6 +154,11 @@ fixture() {
     printf '#!/bin/sh\nexit 42\n' > "${root}/prepare-fails"
     printf '#!/bin/sh\ncount=0\n[ -f "%s/prepare-count" ] && count=$(cat "%s/prepare-count")\necho $((count + 1)) > "%s/prepare-count"\nexit 0\n' "${root}" "${root}" "${root}" > "${root}/prepare-ok"
     chmod +x "${root}/prepare-fails" "${root}/prepare-ok"
+    # A bwrap that answers the probe: EasyBuild runs the sandbox itself, so
+    # the tool only asks for the version and runs "--dev-bind / / true".
+    mkdir -p "${root}/bin"
+    printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "bubblewrap 0.11.0"; exit 0; fi\nif [ -n "${FAKE_BWRAP_FAIL:-}" ]; then echo "setting up uid map: Permission denied (user namespaces disabled)" >&2; exit 1; fi\nexit 0\n' > "${root}/bin/bwrap"
+    chmod +x "${root}/bin/bwrap"
 }
 compare_admin() {
     local label=$1; shift
@@ -250,6 +255,20 @@ compare_admin "build-events, deliver then run" build-events --config @ROOT@/bev/
 compare_admin "build-events, bad metadata" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/bad.json -- true
 compare_admin "build-events, both deliver and command" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json --deliver -- true
 compare_admin "run, eb fails" run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb /bin/false --run-id r3 --skip-live-check --module demo/1 -- demo-1.eb
+# The bwrap backend, with the fake bwrap first on PATH and eb answering
+# --version: present stage keys (5.4.2), the 5.3 layout without them, an
+# unknown release without them, an overlay mount, and a failed probe.
+bw='env PATH=@ROOT@/bin:'"${PATH}"
+compare_admin "run, bwrap" ${bw} FAKE_EB_VERSION=5.4.2 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b1 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, bwrap, 5.3 layout without stage keys" ${bw} FAKE_EB_VERSION=5.3.1 FAKE_EB_KEYS=legacy @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b2 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, bwrap, unknown release without stage keys" ${bw} FAKE_EB_VERSION=5.5.0 FAKE_EB_KEYS=legacy @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b3 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, bwrap, overlay" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_EB_OVERLAY=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b4 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, bwrap probe fails" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_BWRAP_FAIL=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b5 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run, auto prefers bwrap" ${bw} FAKE_EB_VERSION=5.4.2 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend auto --eb @ROOT@/eb --run-id b6 --skip-live-check --module demo/1 -- demo-1.eb
+compare_admin "run --dry-run, auto when bwrap fails" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_BWRAP_FAIL=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend auto --eb @ROOT@/eb --dry-run --module demo/1 -- demo-1.eb
+for v in 5.3.0 5.3.1 5.4.0 5.4.1 5.4.2 5.5.0; do
+    compare_admin "probe, EasyBuild ${v} stage keys" ${bw} FAKE_EB_VERSION=${v} @CMD@ probe --path @ROOT@/state --json --eb @ROOT@/eb
+done
 compare_admin "gc, retire, gc and keeps" gc --state-root @ROOT@/state --dry-run
 compare_admin "retire --dry-run, a directory" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo --dry-run
 compare_admin "retire, a directory" retire --state-root @ROOT@/state --module-file @ROOT@/modules/all/demo
