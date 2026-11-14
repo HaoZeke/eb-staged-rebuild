@@ -141,6 +141,15 @@ def main(argv):
     rels = (os.environ.get("FAKE_EB_RELS") or _rel()).split(",")
     for rel in rels:
         _write_tree(software, modules, os.path.join(software, rel), rel)
+    # FAKE_EB_LEDGER_EDIT: a ledger configuration this build changes, to
+    # show that the policy was frozen before the build started.
+    edit = os.environ.get("FAKE_EB_LEDGER_EDIT")
+    if edit:
+        with open(edit, encoding="utf-8") as handle:
+            policy = json.load(handle)
+        policy["actor"] = "different-actor"
+        with open(edit, "w", encoding="utf-8") as handle:
+            json.dump(policy, handle)
     # FAKE_EB_SEAL=1: leave each installation and the module tree read-only,
     # as an easyconfig that seals its install does.
     # FAKE_EB_SEAL=modules: only the module tree.

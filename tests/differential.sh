@@ -278,10 +278,46 @@ compare_admin "run, ledger" run --software @ROOT@/software --modules @ROOT@/modu
 compare_admin "status, ledger run" status --state-root @ROOT@/state r5
 compare_admin "resume a complete ledger run" resume --state-root @ROOT@/state r5
 compare_admin "rollback a ledger run" rollback --state-root @ROOT@/state r5
+compare_admin "rollback a ledger run again" rollback --state-root @ROOT@/state r5
 for impl in py zig; do echo fail-before > "${work}/${impl}/plan"; done
 export FAKE_LEDGER_PLAN_NAME=plan
 compare_admin "run, ledger append fails" env FAKE_LEDGER_PLAN=@ROOT@/plan @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r6 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
 compare_admin "resume delivers the record" resume --state-root @ROOT@/state r6
+compare_admin "ledger records so far" env cat @ROOT@/ledger.jsonl
+# The ledger policy a run started with is frozen in its journal: a change
+# while a record is pending, after the run completed, or during the build
+# is refused, and nothing is appended.
+ledger_edit() {
+    local impl
+    for impl in py zig; do
+        python3 -c 'import json, sys; p = sys.argv[1]; d = json.load(open(p)); d[sys.argv[2]] = json.loads(sys.argv[3]); json.dump(d, open(p, "w"))' \
+            "${work}/${impl}/ledger.json" "$1" "${2//@ROOT@/${work}/${impl}}"
+    done
+}
+for impl in py zig; do cp "${work}/${impl}/ledger.json" "${work}/${impl}/ledger.json.orig"; echo fail-before > "${work}/${impl}/plan3"; done
+ledger_restore() { local impl; for impl in py zig; do cp "${work}/${impl}/ledger.json.orig" "${work}/${impl}/ledger.json"; done; }
+compare_admin "run, ledger append fails again" env FAKE_LEDGER_PLAN=@ROOT@/plan3 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r14 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
+ledger_edit required false
+compare_admin "resume after the ledger became optional" resume --state-root @ROOT@/state r14
+ledger_restore; ledger_edit actor '"other"'
+compare_admin "resume after the ledger actor changed" resume --state-root @ROOT@/state r14
+ledger_restore
+compare_admin "resume after the policy is restored" resume --state-root @ROOT@/state r14
+ledger_edit log '"@ROOT@/redirected.jsonl"'
+compare_admin "resume a completed run with its ledger redirected" resume --state-root @ROOT@/state r14
+ledger_restore
+compare_admin "run, the build changes the ledger policy" env FAKE_EB_LEDGER_EDIT=@ROOT@/ledger.json @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend installpath --eb @ROOT@/eb --run-id r15 --skip-live-check --ledger-config @ROOT@/ledger.json --module demo/1 -- demo-1.eb
+ledger_restore
+compare_admin "ledger records after the policy cases" env cat @ROOT@/ledger.jsonl
+# A generation-pointer record (schema 3) is not applied as a directory swap.
+for impl in py zig; do
+    mkdir -p "${work}/${impl}/state/runs/foreign"
+    printf '{"schema": 3, "publication": "generation-pointer", "kind": "publish", "run_id": "foreign", "state": "built", "software": "%s/software", "modules": "%s/modules", "state_root": "%s/state", "modules_plan": [{"rel": "all/demo/1.lua", "generation": "%s/hidden-generation", "live_module": "%s/modules/all/demo/1.lua"}], "ledger_policy": {"actor": "x"}}\n' \
+        "${work}/${impl}" "${work}/${impl}" "${work}/${impl}" "${work}/${impl}" "${work}/${impl}" > "${work}/${impl}/state/runs/foreign/journal.json"
+done
+compare_admin "resume a generation-pointer record" resume --state-root @ROOT@/state foreign
+compare_admin "status of a generation-pointer record" status --state-root @ROOT@/state foreign
+for impl in py zig; do rm -rf "${work}/${impl}/state/runs/foreign"; done
 compare_admin "build-events, command succeeds" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json -- true
 compare_admin "build-events, recorded, not repeated" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json -- false
 compare_admin "build-events, deliver a recorded one" build-events --config @ROOT@/bev/config.json --metadata @ROOT@/bev/ok.json --deliver
