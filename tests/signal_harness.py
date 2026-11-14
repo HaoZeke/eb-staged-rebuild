@@ -107,15 +107,20 @@ def start(impl, root):
 
 
 def wait_for(path, proc):
+    """The JSON the worker writes at `path`, once it is complete: the worker
+    writes it in place, so the file can exist before it holds the list."""
     deadline = time.monotonic() + 30
-    while not os.path.exists(path):
+    while True:
+        try:
+            with open(path) as handle:
+                return json.load(handle)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
         if proc.poll() is not None:
             raise AssertionError(f"the run exited {proc.returncode} before the command was ready")
         if time.monotonic() > deadline:
             raise AssertionError("the command never became ready")
         time.sleep(0.01)
-    with open(path) as handle:
-        return json.load(handle)
 
 
 def lock_is_held(root):
