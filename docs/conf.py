@@ -107,7 +107,6 @@ autodoc_default_options = {
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "eb-stack": ("https://eb-stack.rgoswami.me/", None),
 }
 
 copybutton_prompt_text = r"\$ |eb-staged-rebuild: "
