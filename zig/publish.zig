@@ -384,18 +384,26 @@ fn publisherError(a: Allocator, comptime f: []const u8, args: anytype) error{Pub
 
 const Bounded = struct { code: u32, stdout: []const u8, stderr: []const u8 };
 
-/// _bounded: the program in its own process group with a deadline; the
-/// first 64 KiB of each stream kept.
+/// _bounded: the program in its own process group with a deadline. The
+/// first 64 KiB of each stream is kept and the rest read and dropped; the
+/// call returns once the program exits, after its group is killed and every
+/// member has exited. A writer that left the group gets EPIPE.
 fn bounded(a: Allocator, envp: common.proc.Envp, argv: []const []const u8, config: Py) error{ Publisher, OutOfMemory }!Bounded {
     const ms: u32 = @intFromFloat(@min(timeoutSeconds(config) * 1000, 4.0e9));
-    const r = common.proc.run(a, argv[0], argv, envp, .{ .stdout_limit = 64 << 20, .stderr_limit = 64 << 20, .timeout_ms = ms, .grace_ms = 0 }) catch |err| switch (err) {
+    const r = common.proc.run(a, argv[0], argv, envp, .{
+        .stdout_limit = output_limit,
+        .stdout_overflow = .truncate,
+        .stderr_limit = output_limit,
+        .timeout_ms = ms,
+        .grace_ms = 0,
+        .end_with_leader = true,
+        .wait_for_group = true,
+    }) catch |err| switch (err) {
         error.TimedOut => return publisherError(a, "{s} {s} {s} timed out after {s}s", .{ argv[0], argv[1], argv[2], timeoutText(a, config) }),
         error.OutOfMemory => return error.OutOfMemory,
         else => return publisherError(a, "cannot start {s}: {s}", .{ argv[0], main_mod.osError(a, err, argv[0]) }),
     };
-    const out = r.stdout[0..@min(r.stdout.len, output_limit)];
-    const er = r.stderr[0..@min(r.stderr.len, output_limit)];
-    return .{ .code = r.term.code(), .stdout = try common.pytext.decodeReplace(a, out), .stderr = try common.pytext.decodeReplace(a, er) };
+    return .{ .code = r.term.code(), .stdout = try common.pytext.decodeReplace(a, r.stdout), .stderr = try common.pytext.decodeReplace(a, r.stderr) };
 }
 
 fn lastChars(t: []const u8, n: usize) []const u8 {
