@@ -77,18 +77,8 @@ pub fn lastMessage() []const u8 {
 
 /// Python's text of an OSError on `path`.
 fn osError(a: Allocator, err: anyerror, path: []const u8) []const u8 {
-    const t: struct { n: u32, s: []const u8 } = switch (err) {
-        error.NotFound => .{ .n = 2, .s = "No such file or directory" },
-        error.AccessDenied => .{ .n = 13, .s = "Permission denied" },
-        error.IsDir => .{ .n = 21, .s = "Is a directory" },
-        error.NotDir => .{ .n = 20, .s = "Not a directory" },
-        error.SymLink => .{ .n = 40, .s = "Too many levels of symbolic links" },
-        error.Exists => .{ .n = 17, .s = "File exists" },
-        error.NoSpace => .{ .n = 28, .s = "No space left on device" },
-        error.ReadOnly => .{ .n = 30, .s = "Read-only file system" },
-        else => return std.fmt.allocPrint(a, "{t}: {s}", .{ err, repr(a, path) }) catch path,
-    };
-    return std.fmt.allocPrint(a, "[Errno {d}] {s}: {s}", .{ t.n, t.s, repr(a, path) }) catch path;
+    const text = if (common.sys.asError(err)) |e| common.sys.describe(e) else @errorName(err);
+    return std.fmt.allocPrint(a, "{s}: {s}", .{ text, repr(a, path) }) catch path;
 }
 
 fn osFail(a: Allocator, err: anyerror, path: []const u8) Fail {

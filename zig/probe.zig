@@ -259,15 +259,7 @@ fn filesystem(a: Allocator, path: []const u8) Py {
 }
 
 fn strerror(e: linux.E) []const u8 {
-    return switch (e) {
-        .INVAL => "Invalid argument",
-        .NOSYS => "Function not implemented",
-        .PERM => "Operation not permitted",
-        .ACCES => "Permission denied",
-        .XDEV => "Invalid cross-device link",
-        .OPNOTSUPP => "Operation not supported",
-        else => @tagName(e),
-    };
+    return common.sys.errnoText(e) orelse @tagName(e);
 }
 
 fn mkdtemp(a: Allocator, dir: []const u8, prefix: []const u8) ![]const u8 {

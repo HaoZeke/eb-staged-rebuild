@@ -76,18 +76,7 @@ pub var injected_at: ?[]const u8 = null;
 
 /// The text Python's OSError gives for an errno execve returns.
 pub fn strerror(e: linux.E) []const u8 {
-    return switch (e) {
-        .NOENT => "No such file or directory",
-        .ACCES => "Permission denied",
-        .NOEXEC => "Exec format error",
-        .NOTDIR => "Not a directory",
-        .LOOP => "Too many levels of symbolic links",
-        .NAMETOOLONG => "File name too long",
-        .TXTBSY => "Text file busy",
-        .NOMEM => "Cannot allocate memory",
-        .@"2BIG" => "Argument list too long",
-        else => @tagName(e),
-    };
+    return common.sys.errnoText(e) orelse @tagName(e);
 }
 
 /// run_command: the command's exit code, 128 + signal for a signalled
