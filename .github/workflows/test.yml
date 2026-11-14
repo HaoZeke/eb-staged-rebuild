@@ -16,6 +16,8 @@ jobs:
         uses: ./.github/actions/pinned-ledger
       - name: unit tests
         run: python -m unittest discover -s tests -v
+      - name: every test that imports the Python code has a TESTMAP.md row
+        run: python tests/check_testmap.py
 
   integration:
     runs-on: ubuntu-latest
