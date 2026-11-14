@@ -562,7 +562,9 @@ fn exitCode(status: Py, problem: bool) u8 {
     if (std.mem.eql(u8, outcome, "unknown")) return unknown_exit;
     if (std.mem.eql(u8, outcome, "not-started")) return not_started_exit;
     const e = exitStatus(status) orelse 0;
-    if (e != 0) return @intCast(@as(u64, @intCast(e)) & 0xff);
+    // Python's status & 0xff on its unbounded two's complement integer: the
+    // low byte of the 64-bit pattern, also for a negative status.
+    if (e != 0) return @truncate(@as(u64, @bitCast(e)));
     return if (problem) postcheck_exit else 0;
 }
 
@@ -618,6 +620,17 @@ const Op = struct {
         return v;
     }
 
+    /// A field every saved state of this stage has. A state file missing it
+    /// was truncated or edited: the Python tool fails there with KeyError,
+    /// and this refuses instead of crashing.
+    fn need(op: *Op, v: ?Py, key: []const u8) error{NeedsIntervention}!Py {
+        const field = if (v) |d| get(d, key) else null;
+        return field orelse {
+            why = std.fmt.allocPrint(op.a, "operation state {s} has no {s}; inspect or remove it", .{ op.path, key }) catch oom();
+            return error.NeedsIntervention;
+        };
+    }
+
     fn save(op: *Op, st: Py, step: []const u8) Refusal!void {
         const raw = try std.fmt.allocPrint(op.a, "{s}\n", .{try json.dumps(op.a, st, 2, true)});
         var w: atomic.Why = .{};
@@ -626,7 +639,7 @@ const Op = struct {
     }
 
     /// Refuse a retry whose policy or metadata differ from the recorded one.
-    fn check(op: *Op, st: Py) Refusal!void {
+    fn check(op: *Op, st: Py) error{ Refused, OutOfMemory, NeedsIntervention }!void {
         const a = op.a;
         if (!publish.sameValue(a, get(st, "policy") orelse .null, op.policy))
             return refuse(a, "operation {s} was recorded with another ledger policy; use a new operation", .{s(get(op.meta, "operation"))});
@@ -634,14 +647,14 @@ const Op = struct {
         const path = s(get(ec, "path"));
         if (lexists(path) or !has(ec, "sha256")) {
             if (!lexists(path)) {
-                ec = set(a, ec, "sha256", get(get(get(st, "metadata").?, "easyconfig").?, "sha256") orelse .null);
+                ec = set(a, ec, "sha256", get(try op.need(try op.need(st, "metadata"), "easyconfig"), "sha256") orelse .null);
             } else {
                 ec = get(try resolveInputs(a, set(a, Py{ .dict = &.{} }, "easyconfig", ec)), "easyconfig").?;
             }
         }
         if (!publish.sameValue(a, set(a, op.meta, "easyconfig", ec), get(st, "metadata") orelse .null))
             return refuse(a, "operation {s} was recorded with different metadata; use a new operation", .{s(get(op.meta, "operation"))});
-        op.meta = get(st, "metadata").?;
+        op.meta = try op.need(st, "metadata");
     }
 
     fn deliver(op: *Op, recs: []const Py, step: []const u8) error{ Refused, OutOfMemory, NeedsIntervention }![]const Py {
@@ -678,13 +691,13 @@ fn pendingText(a: Allocator, left: []const Py) []const u8 {
 
 fn finish(op: *Op, st: Py, recorded: bool) error{ Refused, OutOfMemory, NeedsIntervention }!Outcome {
     const a = op.a;
-    const left = try op.deliver(&.{ get(st, "started").?, get(st, "terminal").? }, "outbox.terminal");
-    const status = get(st, "result").?;
+    const left = try op.deliver(&.{ try op.need(st, "started"), try op.need(st, "terminal") }, "outbox.terminal");
+    const status = try op.need(st, "result");
     const problem = get(st, "problem");
     const has_problem = problem != null and problem.? != .null;
     var code = exitCode(status, has_problem);
     var notes: std.ArrayList([]const u8) = .empty;
-    try notes.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ s(get(get(st, "terminal").?, "stage")), reason(a, status) }));
+    try notes.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ s(get(try op.need(st, "terminal"), "stage")), reason(a, status) }));
     if (has_problem) try notes.append(a, s(problem));
     if (recorded) try notes.append(a, "recorded by an earlier attempt; the command was not repeated");
     if (left.len > 0) {
@@ -776,7 +789,7 @@ fn runBuild(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config_raw: Py, metad
         st = try recordExit(&op, st, dict(a, &.{ .{ .key = "outcome", .value = Py.s("unknown") }, .{ .key = "exit_status", .value = .null } }));
         return finish(&op, st, false);
     }
-    const left = try op.deliver(&.{get(st, "started").?}, "outbox.started");
+    const left = try op.deliver(&.{try op.need(st, "started")}, "outbox.started");
     if (left.len > 0 and pyfmt.truthy(get(config, "required")))
         return .{ .code = publish.pending_exit, .message = try std.fmt.allocPrint(a, "command not run: {s}; retry to deliver from {s}", .{ pendingText(a, left), op.dir }) };
     st = set(a, st, "phase", Py.s("running"));
@@ -818,7 +831,7 @@ fn deliverOnly(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config_raw: Py, me
         st = try recordExit(&op, st, dict(a, &.{ .{ .key = "outcome", .value = Py.s("unknown") }, .{ .key = "exit_status", .value = .null } }));
         return finish(&op, st, false);
     }
-    const left = try op.deliver(&.{get(st, "started").?}, "outbox.started");
+    const left = try op.deliver(&.{try op.need(st, "started")}, "outbox.started");
     if (left.len > 0) return .{ .code = publish.pending_exit, .message = try std.fmt.allocPrint(a, "command not run: {s}", .{pendingText(a, left)}) };
     return .{ .code = 0, .message = "started acknowledged; the command has not run" };
 }
@@ -918,4 +931,14 @@ pub fn main(a: Allocator, args_in: []const []const u8, env: probe.Env) u8 {
     };
     cli.err("build-events: {s}\n", .{outcome.message});
     return outcome.code;
+}
+
+test "exitCode keeps the low byte of any recorded status, as sys.exit does" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    for ([_][2]i64{ .{ 3, 3 }, .{ -1, 255 }, .{ 256, 0 }, .{ 257, 1 }, .{ -256, 0 }, .{ std.math.minInt(i64), 0 } }) |case| {
+        const status = dict(a, &.{ .{ .key = "outcome", .value = Py.s("exited") }, .{ .key = "exit_status", .value = .{ .int = case[0] } } });
+        try std.testing.expectEqual(@as(u8, @intCast(case[1])), exitCode(status, false));
+    }
 }
