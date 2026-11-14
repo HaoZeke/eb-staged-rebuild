@@ -130,3 +130,25 @@ code, stdout, stderr and the module file's bytes, mode and ACL.
 | test_acl_publication.AclPublicationTests.test_denied_acl_write_mid_publication_is_refused_and_rolls_back | `tests/test_acl_publication_cli.py` (the `-Dtest-ops` test artifact, each ACL model) |
 | test_acl_publication.AclPublicationTests.test_live_acl_change_during_backup_refuses_that_publication | `tests/test_acl_publication_cli.py` (the `-Dtest-ops` test artifact, each ACL model) |
 | test_acl_publication.AclPublicationTests.test_unsupported_destination_model_refuses_publication | `tests/test_acl_publication_cli.py` (the `-Dtest-ops` test artifact, each ACL model) |
+
+## tests/test_cluster_lock.py (zig-common `state.RootLock`)
+
+The Zig build takes the state-root lock with zig-common's `RootLock`; these tests are ported to zig-common `src/state_test.zig`,
+with failing calls injected through `state.lock_ops` and the other process a forked child.
+
+| test | replacement |
+|---|---|
+| test_cluster_lock.ClusterLockTests.test_record_lock_excludes_an_independent_kernel_gate | zig-common `src/state_test.zig` test "the record lock excludes an independent kernel gate" |
+| test_cluster_lock.ClusterLockTests.test_failed_local_contenders_preserve_record_lock | zig-common `src/state_test.zig` test "failed local contenders keep the record lock" |
+| test_cluster_lock.ClusterLockTests.test_double_acquire_preserves_both_locks | zig-common `src/state_test.zig` test "a second acquire by the holder keeps both locks" (Zig: a second acquire is Busy, not Python's RuntimeError; both locks are asserted held after it) |
+| test_cluster_lock.ClusterLockTests.test_acquisition_errors_release_descriptors_and_gate | zig-common `src/state_test.zig` test "acquisition errors release the descriptors and the gate" |
+| test_cluster_lock.ClusterLockTests.test_sidecar_open_failure_releases_local_gate | zig-common `src/state_test.zig` test "a sidecar open failure releases the local gate" |
+| test_cluster_lock.ClusterLockTests.test_fork_child_release_does_not_unlock_parent | zig-common `src/state_test.zig` test "a forked child's release does not unlock the parent" |
+| test_cluster_lock.ClusterLockTests.test_release_error_still_closes_both_layers | zig-common `src/state_test.zig` test "a release error still closes both layers" |
+| test_cluster_lock.ClusterLockTests.test_sidecar_hardlink_is_refused | zig-common `src/state_test.zig` test "a hard-linked sidecar is refused" |
+
+## tests/test_probe_cli.py: the lock wait
+
+| test | replacement |
+|---|---|
+| test_probe_cli.LockTests.test_second_lock_does_not_wait_forever | zig-common `src/state.zig` test "RootLock refuses a second holder and is free after release"; the timed wait: `src/state_test.zig` test "a timed acquire does not wait forever" |
