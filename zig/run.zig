@@ -308,7 +308,9 @@ fn checkInstallDir(r: *R, rel: []const u8) E!void {
 fn removeGenerationModules(r: *R, generation_root: []const u8) E!void {
     const modules = try std.fs.path.join(r.a, &.{ admin.abspath(r.a, generation_root), "modules" });
     if (isKind(modules, "symlink")) return r.refuse("refusing to clear a symlinked module stage: {s}", .{modules});
-    if (isKind(modules, "dir")) fsx.deleteTree(r.a, fsx.cwd, modules) catch |err| return r.refuse("{s}", .{main_mod.osError(r.a, err, modules)});
+    // remove_generation_tree: owned directories on one filesystem, each
+    // opened 0700 when a sealed build left it without write or search.
+    if (isKind(modules, "dir")) admin.removeTree(r.ctx, modules, admin.abspath(r.a, generation_root));
 }
 
 fn build(r: *R) E!u8 {

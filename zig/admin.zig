@@ -446,7 +446,7 @@ fn safeRetiredPath(c: *Ctx, m: Py) []const u8 {
 
 /// remove_generation_tree: delete an owned tree on one filesystem without
 /// following links, opening a directory 0700 when it refuses entry.
-fn removeTree(c: *Ctx, path_in: []const u8, boundary_in: []const u8) void {
+pub fn removeTree(c: *Ctx, path_in: []const u8, boundary_in: []const u8) void {
     const path = abspath(c.a, path_in);
     const boundary = abspath(c.a, boundary_in);
     if (std.mem.eql(u8, path, boundary) or !isWithin(c.a, path, boundary)) refuse("cleanup path is outside its generation boundary: {s}", .{path});
