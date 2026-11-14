@@ -6,26 +6,13 @@ stderr. TOOL_BIN names the binary to test; without it the Python module runs.
 """
 
 import os
-import subprocess
 import sys
 import textwrap
 import unittest
 
 from eb_staged_rebuild import build_events
 from eb_staged_rebuild.ledger_adapter import _OUTPUT_LIMIT
-from tests.test_build_events import FAKE, REPO, Base, Case
-
-TOOL = os.environ.get("TOOL_BIN")
-
-
-class CliCase(Case):
-    def cli(self, *extra, command=None, env=None, timeout=120):
-        head = [TOOL, "build-events"] if TOOL else [sys.executable, "-m", "eb_staged_rebuild.build_events"]
-        argv = [*head, "--config", self.config_path, "--metadata", self.metadata_path, *extra]
-        if command is not None:
-            argv += ["--", *command]
-        return subprocess.run(argv, capture_output=True, text=True, cwd=REPO, timeout=timeout,
-                              env=env if env is not None else dict(os.environ))
+from tests.test_build_events import FAKE, Base, Case
 
 
 class ReceiptLimitTests(Base):
@@ -61,7 +48,7 @@ class ReceiptLimitTests(Base):
                 sys.exit(done.returncode)
             """))
         os.chmod(wrapper, 0o755)
-        return CliCase(root, eb_stack=wrapper)
+        return Case(root, eb_stack=wrapper)
 
     def sizes(self):
         with open(self.sizes_path) as handle:

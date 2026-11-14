@@ -114,3 +114,5 @@ jobs:
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_maintenance.CommandLineTests
       - name: ledger append, recovery and idempotence against eb-stack, both implementations
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_eb_stack_cli
+      - name: build events and the bounded ledger call against the binary
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_build_events tests.test_ledger_bounded_cli

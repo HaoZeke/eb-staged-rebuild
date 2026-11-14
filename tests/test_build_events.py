@@ -26,6 +26,9 @@ from tests.test_command_group_exit import group_members
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAKE = os.path.join(REPO, "tests", "fake_eb_stack.py")
+# TOOL_BIN runs the command-line cases against another build of the tool.
+CLI = ([os.environ["TOOL_BIN"], "build-events"] if os.environ.get("TOOL_BIN")
+       else [sys.executable, "-m", "eb_staged_rebuild.build_events"])
 OPERATION = "job-42.zlib"
 LEDGER_FIELDS = {
     "ts", "actor", "stack", "target", "module", "location", "action", "stage", "id", "index",
@@ -124,7 +127,7 @@ class Case:
                 self.runs, self.modulefile, self.artifact, str(code)]
 
     def cli(self, *extra, command=None, env=None, timeout=120):
-        argv = [sys.executable, "-m", "eb_staged_rebuild.build_events",
+        argv = [*CLI,
                 "--config", self.config_path, "--metadata", self.metadata_path, *extra]
         if command is not None:
             argv += ["--", *command]
@@ -132,7 +135,7 @@ class Case:
                               env=env if env is not None else dict(os.environ))
 
     def popen(self, command, env=None):
-        argv = [sys.executable, "-m", "eb_staged_rebuild.build_events",
+        argv = [*CLI,
                 "--config", self.config_path, "--metadata", self.metadata_path, "--", *command]
         return subprocess.Popen(argv, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 env=env if env is not None else dict(os.environ))
@@ -778,7 +781,7 @@ class RealLedgerTests(Base):
             path = os.path.join(case.root, f"metadata-{number}.json")
             with open(path, "w") as handle:
                 json.dump(metadata, handle)
-            argv = [sys.executable, "-m", "eb_staged_rebuild.build_events", "--config", case.config_path,
+            argv = [*CLI, "--config", case.config_path,
                     "--metadata", path, "--", *case.command(operation=operation)]
             writers.append(subprocess.Popen(argv, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
         for writer in writers:
