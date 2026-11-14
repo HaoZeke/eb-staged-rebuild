@@ -39,6 +39,10 @@ jobs:
           ! grep -aq EB_STAGED_REBUILD_ACL_MODEL out/bin/eb-staged-rebuild
           ! grep -aq EB_STAGED_REBUILD_FAIL_AT out/bin/eb-staged-rebuild
           ! zig build -Dtest-ops -Drelease=true
+          zon=$(sed -nE 's/^ *\.version = "([^"]+)".*/\1/p' build.zig.zon)
+          if [ "${zon}" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "versions: tag ${GITHUB_REF_NAME}, build.zig.zon ${zon}"; exit 1
+          fi
           got=$(out/bin/eb-staged-rebuild --version)
           py=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' eb_staged_rebuild/__init__.py)
           if [ "${got}" != "eb-staged-rebuild ${GITHUB_REF_NAME#v}" ] || [ "${py}" != "${GITHUB_REF_NAME#v}" ]; then
@@ -70,6 +74,17 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The release notes are the tag's section of CHANGELOG.md, "## X.Y.Z"
+      # or "## [X.Y.Z] - date"; a tag without one is not released.
+      - name: release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '/^## /{ if (on) exit; h = $0; sub(/^## \[?/, "", h); sub(/[] ].*$/, "", h); on = (h == v); next } on' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then echo "CHANGELOG.md has no section for ${v}"; exit 1; fi
+          cat release-notes.md
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: bin-*
@@ -84,4 +99,4 @@ jobs:
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --notes-file /dev/null --draft
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --draft
