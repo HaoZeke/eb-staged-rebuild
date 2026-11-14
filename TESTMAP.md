@@ -152,3 +152,214 @@ with failing calls injected through `state.lock_ops` and the other process a for
 | test | replacement |
 |---|---|
 | test_probe_cli.LockTests.test_second_lock_does_not_wait_forever | zig-common `src/state.zig` test "RootLock refuses a second holder and is free after release"; the timed wait: `src/state_test.zig` test "a timed acquire does not wait forever" |
+
+## Commands that change a fixture: run, resume, rollback, retire, gc, probe, resolve
+
+Five test programs run the Python tool and the binary on separate copies of one fixture and compare what each leaves:
+
+- `tests/differential.sh`: each `compare` or `compare_admin "LABEL"` line is one case, and a row cites the
+  LABEL. It compares exit code, stdout and stderr, and for `compare_admin` also the journals and the file
+  tree, after normalizing paths, times and hashes.
+- `tests/crash_matrix.py`: a run, a rollback, a retire and a retire's rollback are paused at every fault step
+  the Python tool reaches, killed with SIGKILL, then resumed or rerun. Fixtures: one module, two modules
+  (`lib/1`, `app/1`), a `--prepare` policy that counts its runs, a sealed installation (read-only trees) and
+  a forced ordinary-rename fallback. A row cites "FIXTURE: run killed at STEP" and its rollback forms.
+- `tests/fail_matrix.py`: against the `-Dtest-ops` artifact, `EB_STAGED_REBUILD_FAIL_AT=STEP` makes a step
+  fail with an I/O error in both implementations (the Python fault injector raises `OSError(EIO)`), for
+  every step of a run and a rollback, with one and two modules.
+- `tests/signal_harness.py`: SIGTERM or SIGINT to a run while its build command runs, a command that exits
+  with stray workers, and a retire while another process has the state lock.
+- `tests/test_easybuild_integration_cli.py`: the real-EasyBuild tests with `TOOL_BIN run` in place of the
+  Python engine (`EB_STAGED_REBUILD_INTEGRATION=1`, EasyBuild 5.4.2 and Lmod).
+
+Python-only internals are covered by the Zig unit test of the same function, named as
+`zig/FILE.zig` test "NAME".
+
+### tests/test_engine.py
+
+| test | replacement |
+|---|---|
+| TransactionTests.test_success_uses_fallback_and_keeps_old_tree_for_rollback | crash_matrix "fallback: run published" (journal `swap_method` `rename-fallback`, old tree kept as the hidden sibling) and "fallback: rollback killed at rollback.swap:all/demo/1.lua.fallback.*" |
+| TransactionTests.test_success_uses_rename_exchange_when_probe_succeeds | differential "run, installpath" (journal `swap_method` `renameat2-exchange`) |
+| TransactionTests.test_every_recorded_failure_restores_old_tree_then_resumes | fail_matrix "one module: run fails at STEP", every step |
+| TransactionTests.test_failure_on_second_module_restores_both_modules | fail_matrix "two modules: run fails at STEP", every step of `lib/1` and `app/1` |
+| TransactionTests.test_failed_build_never_touches_live_tree | differential "run, eb fails" |
+| TransactionTests.test_dry_run_creates_no_state_and_changes_nothing | differential "run --dry-run, installpath", "run --dry-run, auto", "run --dry-run, userns" |
+| TransactionTests.test_missing_rebuild_target_is_refused_before_build | differential "run, no installed target" |
+| TransactionTests.test_symlink_rebuild_target_is_refused_before_build | differential "run, symlinked target" |
+| TransactionTests.test_module_path_cannot_escape_software_root | differential "run, module escapes" |
+| TransactionTests.test_symlinked_state_root_is_refused | differential "run, symlinked state root" |
+| RollbackTests.test_rollback_restores_exact_old_directory | differential "rollback the run", "rollback the run again" |
+| RollbackTests.test_every_rollback_failure_restores_published_tree | fail_matrix "one module: rollback fails at STEP", every step |
+| GarbageCollectionTests.test_gc_removes_only_the_hidden_retired_tree_after_grace | differential "gc keeps within grace", "gc removes past grace", "gc again" |
+
+### tests/test_retire.py
+
+| test | replacement |
+|---|---|
+| RetireTests.test_retire_moves_module_and_leaves_software | differential "retire" |
+| RetireTests.test_dry_run_changes_nothing | differential "retire --dry-run" |
+| RetireTests.test_dry_run_still_refuses | differential "retire --dry-run, a directory" |
+| RetireTests.test_resume_refuses_a_retire_record | differential "resume a retire record" |
+| RetireTests.test_rollback_puts_module_back | differential "rollback the retire", "rollback again" |
+| RetireTests.test_rollback_refuses_to_overwrite_a_new_module_file | differential "rollback over a new module file", "rollback after the new file is gone" |
+| RetireTests.test_retire_again_after_rollback | differential "retire after a rollback" |
+| RetireTests.test_refuses_already_retired | differential "retire again" |
+| RetireTests.test_refuses_non_regular_files | differential "retire, a directory", "retire, a symlinked module file", "retire, no module file" |
+| RetireTests.test_refuses_module_without_root | differential "retire, no root assignment" |
+| RetireTests.test_refuses_when_lock_is_held | signal_harness "retire while the state lock is held: refused, module kept" |
+| RetireTests.test_refuses_different_filesystem | differential "retire, state root on another filesystem" (where `/dev/shm` is writable) |
+| RetireTests.test_crash_before_rename_leaves_module_and_rolls_back | crash_matrix "retire killed at retire.fsync", "retire killed at retire.rename" (a second retire is refused, the rollback restores the module file) |
+| RetireTests.test_crash_after_rename_rolls_back | crash_matrix "retire killed at journal.retired.write", ".fsync", ".rename" |
+| RetireGcTests.test_software_dir_outside_generations_is_reported_not_deleted | differential "gc keeps within grace", "gc removes past grace" (both after "retire") |
+| RetireGcTests.test_rolled_back_retire_keeps_directory_referenced | differential "gc after the retire is rolled back" |
+| RetireGcTests.test_directory_still_resolved_by_another_module_is_kept | differential "retire an alias", "rollback the alias retire", "retire the module again", "gc keeps a directory a live module names" |
+| RetireGcTests.test_swapped_publish_then_retire_keeps_live_tree_and_drops_hidden_sibling | differential "retire a published module", "gc after a published module is retired" |
+
+### tests/test_swap.py
+
+The Python tests pass their own `rename` and `exchange_call`; the Zig tests replace the same calls through
+`swap.ops`, which only a test build or the `-Dtest-ops` artifact can change.
+
+| test | replacement |
+|---|---|
+| SwapTests.test_exchange_swaps_the_complete_directories | `zig/swap.zig` test "swap exchanges two sibling directories and back" |
+| SwapTests.test_exchange_failure_after_success_restores_live | `zig/swap.zig` test "an exchange whose sync fails is exchanged back"; fail_matrix "one module: run fails at swap:all/demo/1.lua.exchange.after" |
+| SwapTests.test_non_fallback_exchange_error_leaves_live_unchanged | `zig/swap.zig` test "an exchange error other than unsupported leaves live unchanged" |
+| SwapTests.test_unsupported_exchange_uses_fallback | `zig/swap.zig` test "an unsupported exchange uses the fallback" |
+| SwapTests.test_every_injected_fallback_failure_restores_live | `zig/swap.zig` test "every failed fallback rename or sync restores live" (the injected step precedes the rename that fails) |
+| SwapTests.test_every_rename_error_in_fallback_restores_live | `zig/swap.zig` test "every failed fallback rename or sync restores live" |
+| SwapTests.test_recover_after_first_fallback_rename | `zig/swap.zig` test "recovery after the first fallback rename" |
+| SwapTests.test_recover_after_second_fallback_rename | `zig/swap.zig` test "recovery after the second fallback rename" |
+
+### tests/test_modulefile.py
+
+| test | replacement |
+|---|---|
+| ModuleFileTests.test_lua_and_tcl_loads_are_dependencies | `zig/modulefile.zig` test "loads, identity and rewriting" |
+| ModuleFileTests.test_parse_lua_and_tcl | `zig/modulefile.zig` test "parseRoot follows the Python patterns"; differential "resolve lua.lua", "resolve tcl" |
+| ModuleFileTests.test_rewrite_does_not_eat_a_longer_prefix | `zig/modulefile.zig` test "loads, identity and rewriting" |
+| ModuleFileTests.test_new_path_that_contains_the_old_path_is_not_doubled | `zig/modulefile.zig` test "a new path that contains the old path is not doubled" |
+| ModuleFileTests.test_refuses_a_file_with_no_root | `zig/modulefile.zig` test "loads, identity and rewriting" |
+
+### tests/test_gc_references.py
+
+| test | replacement |
+|---|---|
+| ReferenceTests.test_unreadable_module_is_not_treated_as_unreferenced | differential "gc, an unreadable live module" (not as root) |
+| ReferenceTests.test_symlink_to_a_hidden_tree_keeps_it | differential "gc keeps within grace" (`kept/.3.0001`, named through the symlink `kept/alias`, is kept: a live module resolves inside it) |
+
+### tests/test_backends.py
+
+A fake `bwrap` and `unshare` first on PATH answer the probes (`FAKE_BWRAP_FAIL`, `FAKE_UNSHARE_FAIL` make them
+refuse), and the fake `eb` answers `--version` with `FAKE_EB_VERSION`.
+
+| test | replacement |
+|---|---|
+| FakeEbTests.test_installpath_swaps_the_staged_generation | differential "run, installpath" |
+| FakeEbTests.test_bwrap_swaps_the_staged_generation | differential "run, bwrap" |
+| FakeEbTests.test_userns_build_mounts_live_trees_read_only_then_swaps | differential "run, userns" |
+| FakeEbTests.test_easybuild_53_layout_without_stage_keys | differential "run, bwrap, 5.3 layout without stage keys" |
+| FakeEbTests.test_missing_stage_key_on_unknown_version_is_not_published | differential "run, bwrap, unknown release without stage keys" |
+| FakeEbTests.test_overlay_upper_is_not_published | differential "run, bwrap, overlay" |
+| FakeEbTests.test_bwrap_refuses_when_probe_fails | differential "run, bwrap probe fails" |
+| FakeEbTests.test_auto_prefers_bwrap | differential "run, auto prefers bwrap" |
+| FakeEbTests.test_auto_uses_installpath_when_no_sandbox_is_available | differential "run, auto with no sandbox uses installpath" |
+| FakeEbTests.test_userns_command_mounts_both_live_trees_read_only | differential "run, userns", "run --dry-run, userns" |
+| BwrapInfoTests.test_legacy_versions_use_the_documented_layout | differential "run, bwrap, 5.3 layout without stage keys" |
+| BwrapInfoTests.test_present_keys_win | differential "run, bwrap" |
+| BwrapInfoTests.test_overlay_is_refused | differential "run, bwrap, overlay" |
+
+### tests/test_prepare_recovery.py
+
+| test | replacement |
+|---|---|
+| PrepareRecoveryTests.test_empty_program_is_refused_by_the_api | differential "run, empty prepare" |
+| PrepareRecoveryTests.test_empty_program_is_refused_before_cli_dispatch | differential "run, empty prepare" |
+| PrepareRecoveryTests.test_failed_policy_retry_preserves_the_built_generation | differential "run, prepare fails", "resume after the prepare is fixed" (resumed from built, no build), "the prepare ran once" |
+| PrepareRecoveryTests.test_child_signal_has_a_shell_exit_status | `zig/builders.zig` test "a command killed by a signal has a shell exit status" |
+| PrepareRecoveryTests.test_policy_journal_requires_schema_two | differential "run, prepare fails" (journal `schema` compared) |
+
+### tests/test_prepare_publication.py
+
+| test | replacement |
+|---|---|
+| PreparePublicationTests.test_finalizer_restricts_generation_before_live_module_changes | differential "run, prepare restricts the staged tree", "the context the prepare saw", "modes after a restricting prepare" |
+| PreparePublicationTests.test_finalizer_nonzero_exit_preserves_live_module | differential "run, prepare fails" |
+| PreparePublicationTests.test_missing_finalizer_preserves_live_module | differential "run, missing prepare" |
+| PreparePublicationTests.test_resume_from_built_runs_unfinished_finalizer | crash_matrix "prepare: run killed at STEP" for the steps from journal.built to prepare.invoke (the policy runs once) |
+| PreparePublicationTests.test_resume_during_publication_does_not_repeat_finalizer | crash_matrix "prepare: run killed at STEP" for the steps after journal.prepared.rename (the policy runs once) |
+
+### tests/test_prepare_barrier.py
+
+| test | replacement |
+|---|---|
+| PrepareBarrierTests.test_incomplete_second_generation_prevents_first_publication | differential "run, prepare barrier, second generation incomplete", "module files after the barrier" |
+| PrepareBarrierTests.test_unreadable_second_generation_prevents_first_publication | differential "run, prepare barrier, second generation unreadable", "module files after the barrier" |
+
+### tests/test_easybuild_integration.py
+
+| test | replacement |
+|---|---|
+| EasyBuildIntegrationTests.test_installpath_backend_keeps_the_live_file | `tests/test_easybuild_integration_cli.py` CliEasyBuildIntegrationTests.test_installpath_backend_keeps_the_live_file |
+| EasyBuildIntegrationTests.test_bwrap_backend_keeps_the_live_file | `tests/test_easybuild_integration_cli.py` CliEasyBuildIntegrationTests.test_bwrap_backend_keeps_the_live_file |
+| EasyBuildIntegrationTests.test_symlink_name_version_is_refused | `tests/test_easybuild_integration_cli.py` CliEasyBuildIntegrationTests.test_symlink_name_version_is_refused |
+
+### tests/test_sealed_install.py
+
+| test | replacement |
+|---|---|
+| SealedInstallTests.test_publish_preserves_sealed_files_and_permissions | crash_matrix "sealed: run killed at STEP" and "sealed: rollback killed at STEP" (published tree keeps 0555/0444, rollback restores the old tree) |
+| SealedInstallTests.test_resume_publishes_sealed_generation_without_rebuilding | crash_matrix "sealed: run killed at journal.publishing.write" and every later step (exactly one build) |
+
+### tests/test_hard_kill.py
+
+| test | replacement |
+|---|---|
+| HardKillTests.test_sigkill_during_publish_fallback_resumes_once | crash_matrix "fallback: run killed at swap:all/demo/1.lua.fallback.*" |
+| HardKillTests.test_sigkill_right_after_rename_exchange_resumes_to_published | crash_matrix "one module: run killed at swap:all/demo/1.lua.exchange.after" and "one module: run killed at swap:all/demo/1.lua.exchange.after, resumed, rolled back" |
+| HardKillTests.test_sigkill_right_after_rollback_exchange_rolls_back_once | crash_matrix "one module: rollback killed at rollback.swap:all/demo/1.lua.exchange.after" |
+| HardKillTests.test_sigkill_during_rollback_fallback_is_idempotent | crash_matrix "fallback: rollback killed at rollback.swap:all/demo/1.lua.fallback.*" |
+
+### tests/test_command_lifecycle.py
+
+| test | replacement |
+|---|---|
+| CommandLifecycleTests.test_sigterm_holds_publication_lock_until_command_group_stops | signal_harness "SIGTERM, command ignores SIGTERM: lock held until the group stops" |
+| CommandLifecycleTests.test_interrupt_stops_descendants_when_the_direct_child_exits_first | signal_harness "SIGINT, direct child exits first: descendants stopped" |
+
+### tests/test_command_group_exit.py
+
+| test | replacement |
+|---|---|
+| CommandGroupExitTests.test_normal_exit_returns_after_stray_workers_have_exited | signal_harness "command exits with stray workers: run returns after they exited"; `zig/builders.zig` test "runCommand returns the exit code and stops the group" |
+| CommandGroupExitTests.test_interrupted_command_returns_after_every_worker_has_exited | signal_harness "SIGTERM with stray workers: run returns after every worker exited" |
+
+### tests/test_version.py
+
+| test | replacement |
+|---|---|
+| Version.test_module_version_matches_pyproject | differential "--version" and its check "same version as build.zig.zon" |
+
+### tests/test_readonly_cleanup.py
+
+| test | replacement |
+|---|---|
+| ReadonlyCleanupTests.test_resume_can_replace_a_readonly_module_stage | crash_matrix "sealed: run killed at build.finish" (the module stage is read-only; resume clears it and publishes) |
+
+### tests/test_cli_docs.py
+
+| test | replacement |
+|---|---|
+| CliDocTests.test_docs_name_every_cli_option | differential "top level --help", "run -h", "resume -h", "rollback -h", "status -h", "gc -h", "retire -h", "probe -h", "resolve -h": the binary's help equals the Python parser's, which this test checks against the docs |
+
+### tests/test_probe_cli.py
+
+| test | replacement |
+|---|---|
+| ProbeTests.test_unreadable_resolve_exits_2_without_a_traceback | differential "resolve an unreadable file" (not as root) |
+| ProbeTests.test_rename_exchange_reports_a_result_for_this_directory | differential "probe --json", "probe text" |
+| ProbeTests.test_probe_all_has_the_open_questions | differential "probe --json" |
+| CliTests.test_dry_run_and_probe_and_resolve | runs against `TOOL_BIN` |
+| BwrapKeyTableTests.test_easybuild_5_4_1_writes_the_stage_path_keys | differential "probe, EasyBuild 5.4.1 stage keys" |
+| BwrapKeyTableTests.test_easybuild_5_4_1_without_the_keys_is_refused_not_guessed | differential "run, bwrap, 5.4.1 without stage keys" |
