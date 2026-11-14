@@ -218,16 +218,14 @@ fn generationComplete(a: Allocator, path: []const u8) bool {
     return false;
 }
 
+/// Python's str() of an OSError with a filename: "[Errno N] text: 'path'",
+/// the path as repr() gives it. An error that is not an OSError is named.
 pub fn osError(a: Allocator, err: anyerror, path: []const u8) []const u8 {
-    const t: struct { n: u32, s: []const u8 } = switch (err) {
-        error.NotFound => .{ .n = 2, .s = "No such file or directory" },
-        error.AccessDenied => .{ .n = 13, .s = "Permission denied" },
-        error.IsDir => .{ .n = 21, .s = "Is a directory" },
-        error.NotDir => .{ .n = 20, .s = "Not a directory" },
-        error.SymLink => .{ .n = 40, .s = "Too many levels of symbolic links" },
-        else => return std.fmt.allocPrint(a, "{t}: '{s}'", .{ err, path }) catch path,
-    };
-    return std.fmt.allocPrint(a, "[Errno {d}] {s}: '{s}'", .{ t.n, t.s, path }) catch path;
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, if (common.sys.asError(err)) |e| common.sys.describe(e) else @errorName(err)) catch oom();
+    out.appendSlice(a, ": ") catch oom();
+    pyfmt.reprStr(&out, a, path) catch oom();
+    return out.items;
 }
 
 fn cmdResolve(a: Allocator, args: []const []const u8) u8 {
