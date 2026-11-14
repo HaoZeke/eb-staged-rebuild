@@ -4,7 +4,23 @@ The runtime is Linux. Publication uses `renameat2`, a local `flock`, a POSIX rec
 
 `eb-staged-rebuild --version` prints `eb_staged_rebuild.__version__`. The command and the distribution metadata both identify version 0.4.4. The changelog records the release behaviour.
 
+## The static binary
+
+Each release carries one static binary per architecture (`x86_64`, `aarch64`), built with Zig 0.17.1 for `linux-musl`, a `SHA256SUMS` file and build provenance attestations:
+
+```bash
+v=1.0.0 arch=x86_64
+curl -LO "https://github.com/stackhands/eb-staged-rebuild/releases/download/v${v}/eb-staged-rebuild-${v}-${arch}-linux-musl"
+curl -LO "https://github.com/stackhands/eb-staged-rebuild/releases/download/v${v}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify "eb-staged-rebuild-${v}-${arch}-linux-musl" --repo stackhands/eb-staged-rebuild
+install -m 0755 "eb-staged-rebuild-${v}-${arch}-linux-musl" ~/.local/bin/eb-staged-rebuild
+```
+
+The binary needs nothing else at run time; the probe tools in the table below are the same. {doc}`../reference/compat` lists where its output differs from the Python tool on purpose. From a checkout, `zig build -Drelease=true` builds it into `zig-out/bin/`.
+
 ## From a checkout
+
 
 This command was run from the repository root:
 
