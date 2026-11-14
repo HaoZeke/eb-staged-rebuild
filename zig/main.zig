@@ -22,7 +22,7 @@ const cli = common.cli;
 const Allocator = std.mem.Allocator;
 const Py = json.Py;
 
-pub const version = "0.4.4";
+pub const version = "1.0.0";
 const prog = "eb-staged-rebuild";
 
 const commands = [_][]const u8{ "probe", "run", "resume", "rollback", "gc", "retire", "status", "resolve" };

@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.0.0
+
+* A static Zig build of every command, one binary per architecture
+  (x86_64, aarch64) built for `linux-musl` on zig-common 0.8.0: `probe`,
+  `status`, `resolve`, `retire`, `gc`, `run`, `resume` and `rollback`, with
+  and without `--ledger-config`, plus `ledger-maintenance` and
+  `build-events` as subcommands. Its output matches the Python tool byte for
+  byte except where `COMPAT.md` lists a deliberate difference. Releases carry
+  the binaries, `SHA256SUMS` and build provenance attestations.
+* CI checks both builds against each other. A differential runs every
+  command and compares the trees and journals it leaves. A crash matrix kills
+  a run, a rollback and a retire at every fault step (295 cases). A fail
+  matrix gives every step an I/O error (152 cases). The signal, ledger,
+  metadata, access-control, build-events and real-EasyBuild suites also run
+  against the binary. `TESTMAP.md` maps each test that imports the Python
+  code to what covers it for the binary, and CI fails on a missing row.
+* Fix: a run killed right after `RENAME_EXCHANGE` resumes to the published
+  state, and a rollback killed right after its exchange rolls back once.
+* Fix (binary): an allocation failure stops the program. It never runs
+  `eb` with the parent environment and without the staged install paths.
+  A restore that cannot be recorded is not ignored. A damaged build-events
+  state file is refused instead of crashing. Error text names the errno the
+  kernel gave.
+* Fix (binary): a missing `eb-stack` is "cannot start", as in Python, and a
+  stop during ledger delivery kills the ledger's process group first.
+* The ledger call keeps the first 64 KiB of each stream, returns when
+  `eb-stack` exits and stops any process it left behind.
+* Documentation: <https://stackhands.github.io/eb-staged-rebuild/>, with the
+  release-binary install and the Zig build's differences.
+
 ## 0.4.4
 
 * Restore the required access control list before removing inherited
