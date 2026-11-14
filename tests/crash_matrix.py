@@ -7,7 +7,10 @@ resumed. Both must leave the same live tree, the same module file and the
 same journal state; a run must end either with the old tree untouched or
 fully published. The same is done for rollback of a complete run.
 
-Four fixtures: one module; two modules (lib/1 and app/1); one module with
+Five fixtures: one module; two modules (lib/1 and app/1); one module
+whose build leaves the installation and module tree read-only, which is
+published with its modes and is not built again once the build was
+journalled; one module with
 a --prepare policy that counts its invocations, which must run once,
 or twice when the kill falls after it exited and before the journal
 recorded it; and one module forced onto the
@@ -39,10 +42,11 @@ FALLBACK = ("live-to-hold", "staged-to-live", "hold-to-staged")
 
 
 class Fixture:
-    def __init__(self, name, rels, prepare=False):
+    def __init__(self, name, rels, prepare=False, seal=False):
         self.name = name
         self.rels = rels
         self.prepare = prepare
+        self.seal = seal
 
     def build(self, root):
         for rel in self.rels:
@@ -66,8 +70,11 @@ class Fixture:
                 handle.write(f'#!/bin/sh\necho x >> "{root}/prepare-count"\n')
             os.chmod(policy, 0o755)
 
-    def env(self):
-        return {"FAKE_EB_RELS": ",".join(self.rels)}
+    def env(self, root):
+        env = {"FAKE_EB_RELS": ",".join(self.rels), "FAKE_EB_ARGV": os.path.join(root, "eb-argv")}
+        if self.seal:
+            env["FAKE_EB_SEAL"] = "1"
+        return env
 
     def run_args(self, root, run_id):
         args = [
@@ -93,6 +100,44 @@ class Fixture:
 ONE = Fixture("one module", ["demo/1"])
 TWO = Fixture("two modules", ["lib/1", "app/1"])
 PREPARE = Fixture("prepare", ["demo/1"], prepare=True)
+SEALED = Fixture("sealed", ["demo/1"], seal=True)
+
+
+def unseal(root):
+    """Make every directory writable again, so the tree can be removed."""
+    for directory, dirs, _files in os.walk(root):
+        for name in dirs:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o755)
+    if os.path.isdir(root):
+        os.chmod(root, 0o755)
+
+
+def remove(root):
+    unseal(root)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def modes(top):
+    """Mode of every path under `top`, relative, without the tool's stamp."""
+    found = {".": oct(os.lstat(top).st_mode & 0o7777)}
+    for directory, dirs, files in os.walk(top):
+        for name in dirs + files:
+            if name == ".eb-staged-rebuild-complete":
+                continue
+            path = os.path.join(directory, name)
+            found[os.path.relpath(path, top)] = oct(os.lstat(path).st_mode & 0o7777)
+    return found
+
+
+def builds(root):
+    """Builds the fake eb ran, not counting the preflight or a version probe."""
+    path = os.path.join(root, "eb-argv")
+    if not os.path.exists(path):
+        return 0
+    with open(path) as handle:
+        return sum(1 for line in handle if any(arg.startswith("--installpath-software=") for arg in json.loads(line)))
 
 
 def with_env(extra, fn):
@@ -114,11 +159,11 @@ def steps_reached(fixture):
     try:
         fixture.build(root)
         faults = FaultInjector()
-        result = with_env(fixture.env(), lambda: run(fixture.spec(root, faults)))
+        result = with_env(fixture.env(root), lambda: run(fixture.spec(root, faults)))
         assert result.returncode == 0, result
         return list(dict.fromkeys(faults.reached))
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        remove(root)
 
 
 def steps_rollback(fixture):
@@ -126,12 +171,12 @@ def steps_rollback(fixture):
     root = tempfile.mkdtemp(prefix="crash-rbsteps-")
     try:
         fixture.build(root)
-        assert with_env(fixture.env(), lambda: run(fixture.spec(root))).returncode == 0
+        assert with_env(fixture.env(root), lambda: run(fixture.spec(root))).returncode == 0
         faults = FaultInjector()
         assert rollback(f"{root}/state", "r1", faults=faults).returncode == 0
         return list(dict.fromkeys(faults.reached))
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        remove(root)
 
 
 def command(impl):
@@ -140,10 +185,10 @@ def command(impl):
     return [os.environ["TOOL_BIN"]]
 
 
-def env_for(fixture, step, ready):
+def env_for(fixture, root, step, ready):
     env = dict(os.environ)
     env["PYTHONPATH"] = REPO
-    env.update(fixture.env())
+    env.update(fixture.env(root))
     if step:
         env["EB_STAGED_REBUILD_PAUSE_AT"] = step
         env["EB_STAGED_REBUILD_PAUSE_READY"] = ready
@@ -155,7 +200,7 @@ def kill_at(impl, fixture, args, step, root):
     """Start the command, wait until it pauses at `step`, then SIGKILL it."""
     ready = os.path.join(root, "ready")
     proc = subprocess.Popen(
-        command(impl) + args, env=env_for(fixture, step, ready), cwd=root,
+        command(impl) + args, env=env_for(fixture, root, step, ready), cwd=root,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     deadline = time.monotonic() + 60
@@ -175,7 +220,7 @@ def kill_at(impl, fixture, args, step, root):
 
 def finish(impl, fixture, args, root):
     return subprocess.run(
-        command(impl) + args, env=env_for(fixture, None, ""), cwd=root, capture_output=True, text=True,
+        command(impl) + args, env=env_for(fixture, root, None, ""), cwd=root, capture_output=True, text=True,
     ).returncode
 
 
@@ -217,13 +262,16 @@ def outcome(fixture, root, run_id):
         if name.startswith(".")
     )
     info = {"payloads": payloads, "modules": modules, "state": state, "methods": methods, "hidden": hidden}
+    if fixture.seal:
+        info["builds"] = builds(root)
+        info["live_modes"] = [modes(os.path.join(root, "software", rel)) for rel in fixture.rels]
     count = os.path.join(root, "prepare-count")
     if fixture.prepare:
         info["prepare_runs"] = open(count).read().count("x") if os.path.exists(count) else 0
     return info
 
 
-def compare(label, fixture, results, kind, must_pause=False, method=None, prepare_runs=1):
+def compare(label, fixture, results, kind, must_pause=False, method=None, prepare_runs=1, one_build=False):
     if results["py"] != results["zig"]:
         print(f"DIFF {label}")
         for impl in ("py", "zig"):
@@ -240,6 +288,11 @@ def compare(label, fixture, results, kind, must_pause=False, method=None, prepar
         # and before the journal recorded it as complete.
         if ok and fixture.prepare and final["state"] == published:
             ok = final["prepare_runs"] == prepare_runs
+        # A sealed installation is published as the build left it, and a
+        # resume after the build was journalled does not build again.
+        if ok and fixture.seal and final["state"] == published:
+            sealed = {mode for tree in final["live_modes"] for mode in tree.values()}
+            ok = sealed <= {"0o555", "0o444"} and (final["builds"] == 1 or not one_build)
     else:
         ok = final["state"] == ("rolled_back", ["restored"] * len(fixture.rels)) and set(final["payloads"]) == {"old\n"}
     if ok and must_pause:
@@ -260,7 +313,7 @@ def each_impl(prefix, body):
         try:
             results[impl] = body(impl, root)
         finally:
-            shutil.rmtree(root, ignore_errors=True)
+            remove(root)
     return results
 
 
@@ -270,6 +323,7 @@ def run_matrix(fixture):
     # The policy's success is durable once journal.prepared is renamed into
     # place; a kill after prepare.invoke and up to that rename reruns it.
     rerun = set()
+    built = set(steps[steps.index("journal.built.rename") + 1:])
     if fixture.prepare:
         start = steps.index("prepare.invoke") + 1
         rerun = set(steps[start:steps.index("journal.prepared.rename", start) + 1])
@@ -281,7 +335,7 @@ def run_matrix(fixture):
             return {"kill": how, "resume_rc": rc, **outcome(fixture, root, "r1")}
         failures += compare(
             f"{fixture.name}: run killed at {step}", fixture, each_impl("crash", body), "run",
-            prepare_runs=2 if step in rerun else 1,
+            prepare_runs=2 if step in rerun else 1, one_build=step in built,
         )
     rollback_steps = steps_rollback(fixture)
     for step in rollback_steps:
@@ -342,7 +396,7 @@ def main():
         print("set TOOL_BIN", file=sys.stderr)
         return 2
     failures = total = 0
-    for fixture in (ONE, TWO, PREPARE):
+    for fixture in (ONE, TWO, PREPARE, SEALED):
         f, t = run_matrix(fixture)
         failures, total = failures + f, total + t
     f, t = fallback_matrix()

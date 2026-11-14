@@ -7,6 +7,7 @@ it records the argv it was given. It does not build software.
 
 import json
 import os
+import shutil
 import sys
 
 
@@ -53,9 +54,23 @@ def _lua(root):
     )
 
 
+def _unseal(top):
+    for directory, dirs, _files in os.walk(top):
+        for name in dirs:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o755)
+    os.chmod(top, 0o755)
+
+
 def _write_tree(software, modules, root_in_module, rel=None):
     rel = rel or _rel()
     generation = os.path.join(software, rel)
+    # eb --rebuild replaces an installation an earlier attempt left, sealed
+    # or not.
+    if os.path.isdir(generation) and not os.path.islink(generation):
+        _unseal(generation)
+        shutil.rmtree(generation)
     _write(os.path.join(generation, "PAYLOAD"), _payload())
     _write(os.path.join(generation, "easybuild", "demo-1.eb"), "name = 'demo'\n")
     module = os.path.join(modules, "all", rel + ".lua")
@@ -118,9 +133,30 @@ def main(argv):
         print("missing installpath", file=sys.stderr)
         return 2
     # FAKE_EB_RELS: a comma-separated list of modules to write instead of one.
-    for rel in (os.environ.get("FAKE_EB_RELS") or _rel()).split(","):
+    rels = (os.environ.get("FAKE_EB_RELS") or _rel()).split(",")
+    for rel in rels:
         _write_tree(software, modules, os.path.join(software, rel), rel)
+    # FAKE_EB_SEAL=1: leave each installation and the module tree read-only,
+    # as an easyconfig that seals its install does.
+    # FAKE_EB_SEAL=modules: only the module tree.
+    seal = os.environ.get("FAKE_EB_SEAL")
+    if seal in ("1", "modules"):
+        for top in ([os.path.join(software, rel) for rel in rels] if seal == "1" else []) + [modules]:
+            _seal(top)
     return 0
+
+
+def _seal(top):
+    for directory, dirs, files in os.walk(top):
+        for name in files:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o444)
+        for name in dirs:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o555)
+    os.chmod(top, 0o555)
 
 
 if __name__ == "__main__":
