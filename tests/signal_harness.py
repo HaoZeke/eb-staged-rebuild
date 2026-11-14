@@ -45,7 +45,7 @@ def lifecycle_worker(root, ignore_term):
         + f"root = Path({root!r})\n"
         "leaf = subprocess.Popen([sys.executable, str(root / 'leaf.py'), str(root / 'leaf-ready')])\n"
         "while not (root / 'leaf-ready').exists(): time.sleep(0.01)\n"
-        "(root / 'pids.json').write_text(json.dumps([os.getpid(), leaf.pid]))\n"
+        "(root / 'pids.json.tmp').write_text(json.dumps([os.getpid(), leaf.pid])); os.replace(root / 'pids.json.tmp', root / 'pids.json')\n"
         "while True: time.sleep(0.05)\n"
     )
 
@@ -60,7 +60,7 @@ def group_worker(root, interrupt):
         "    if os.fork() == 0:\n"
         "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "        while True: time.sleep(0.05)\n"
-        "(root / 'pids.json').write_text(json.dumps([os.getpid()]))\n"
+        "(root / 'pids.json.tmp').write_text(json.dumps([os.getpid()])); os.replace(root / 'pids.json.tmp', root / 'pids.json')\n"
         + ("while True: time.sleep(0.05)\n" if interrupt else "time.sleep(0.2)\n")
     )
 
@@ -107,6 +107,7 @@ def start(impl, root):
 
 
 def wait_for(path, proc):
+    # The helpers write pids.json through a rename, so it exists only once complete.
     deadline = time.monotonic() + 30
     while not os.path.exists(path):
         if proc.poll() is not None:

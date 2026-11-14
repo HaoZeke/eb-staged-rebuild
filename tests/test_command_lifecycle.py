@@ -29,7 +29,7 @@ class CommandLifecycleTests(unittest.TestCase):
                 + f'root = Path({directory!r})\n'
                 'leaf = subprocess.Popen([sys.executable, str(root / "leaf.py")])\n'
                 'while not (root / "leaf-ready").exists(): time.sleep(0.01)\n'
-                '(root / "pids.json").write_text(json.dumps([os.getpid(), leaf.pid]))\n'
+                '(root / "pids.json.tmp").write_text(json.dumps([os.getpid(), leaf.pid])); os.replace(root / "pids.json.tmp", root / "pids.json")\n'
                 'while True: time.sleep(0.05)\n'
             )
             parent_code = (
