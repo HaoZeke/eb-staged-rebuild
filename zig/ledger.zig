@@ -16,6 +16,7 @@
 //! bytes the command verified: the bytes are read once, copied into a private
 //! directory, verified there, and parsed from the same buffer.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const pyfmt = @import("pyfmt.zig");
@@ -62,7 +63,7 @@ var why_alloc: Allocator = std.heap.page_allocator;
 
 fn fail(comptime kind: Fail, comptime f: []const u8, args: anytype) Fail {
     why.clearRetainingCapacity();
-    why.print(why_alloc, f, args) catch {};
+    why.print(why_alloc, f, args) catch oom();
     return kind;
 }
 
@@ -2254,7 +2255,7 @@ fn parseOpts(a: Allocator, cmd: []const u8, args: []const []const u8, opts: []Op
         }
     }
     var missing: std.ArrayList([]const u8) = .empty;
-    for (opts) |o| if (o.required and o.value == null) missing.append(a, std.fmt.allocPrint(a, "--{s}", .{o.name}) catch o.name) catch {};
+    for (opts) |o| if (o.required and o.value == null) missing.append(a, std.fmt.allocPrint(a, "--{s}", .{o.name}) catch o.name) catch oom();
     if (missing.items.len > 0) usageError("the following arguments are required: {s}", .{std.mem.join(a, ", ", missing.items) catch ""});
 }
 

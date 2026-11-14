@@ -5,6 +5,7 @@
 //! retire journal; run, resume and rollback of a run journal follow in the order the port plan
 //! sets, and until then report that they are not in this build.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const modulefile = @import("modulefile.zig");
@@ -118,7 +119,7 @@ fn parseOpts(a: Allocator, args: []const []const u8, opts: []Opt, help: []const 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--")) {
-            for (args[i + 1 ..]) |p| pos.append(a, p) catch {};
+            for (args[i + 1 ..]) |p| pos.append(a, p) catch oom();
             break;
         }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -126,11 +127,11 @@ fn parseOpts(a: Allocator, args: []const []const u8, opts: []Opt, help: []const 
             std.process.exit(0);
         }
         if (arg.len < 2 or arg[0] != '-') {
-            pos.append(a, arg) catch {};
+            pos.append(a, arg) catch oom();
             continue;
         }
         if (!std.mem.startsWith(u8, arg, "--")) {
-            extra.append(a, arg) catch {};
+            extra.append(a, arg) catch oom();
             continue;
         }
         const eq = std.mem.indexOfScalar(u8, arg, '=');
@@ -150,7 +151,7 @@ fn parseOpts(a: Allocator, args: []const []const u8, opts: []Opt, help: []const 
         }
         if (count > 1) usageError(usage, who, "ambiguous option: --{s} could match {s}", .{ name, ambiguous(a, opts, name) });
         const o = match orelse {
-            extra.append(a, arg) catch {};
+            extra.append(a, arg) catch oom();
             continue;
         };
         o.seen = true;
@@ -173,8 +174,8 @@ fn parseOpts(a: Allocator, args: []const []const u8, opts: []Opt, help: []const 
 fn ambiguous(a: Allocator, opts: []const Opt, name: []const u8) []const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (opts) |o| if (std.mem.startsWith(u8, o.name, name)) {
-        if (out.items.len > 0) out.appendSlice(a, ", ") catch {};
-        out.print(a, "--{s}", .{o.name}) catch {};
+        if (out.items.len > 0) out.appendSlice(a, ", ") catch oom();
+        out.print(a, "--{s}", .{o.name}) catch oom();
     };
     return out.items;
 }
@@ -235,17 +236,17 @@ fn cmdResolve(a: Allocator, args: []const []const u8) u8 {
     const pos = parseOpts(a, args, &opts, resolve_help, resolve_usage, prog ++ " resolve", &extra);
     if (pos.len == 0) usageError(resolve_usage, prog ++ " resolve", "the following arguments are required: module", .{});
     var all_extra = extra;
-    for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    for (pos[1..]) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const path = pos[0];
     const kind = lstatKind(path);
     var described: std.ArrayList(Py.Entry) = .empty;
-    described.append(a, .{ .key = "path", .value = Py.s(path) }) catch {};
-    described.append(a, .{ .key = "kind", .value = Py.s(kind) }) catch {};
+    described.append(a, .{ .key = "path", .value = Py.s(path) }) catch oom();
+    described.append(a, .{ .key = "kind", .value = Py.s(kind) }) catch oom();
     var complete = false;
     if (!std.mem.eql(u8, kind, "file")) {
-        described.append(a, .{ .key = "complete", .value = .{ .bool = false } }) catch {};
-        described.append(a, .{ .key = "root", .value = .null }) catch {};
+        described.append(a, .{ .key = "complete", .value = .{ .bool = false } }) catch oom();
+        described.append(a, .{ .key = "root", .value = .null }) catch oom();
     } else {
         // Opened as Python's open() does: following a link, which lstat
         // above has already ruled out.
@@ -255,10 +256,10 @@ fn cmdResolve(a: Allocator, args: []const []const u8) u8 {
         if (!std.unicode.utf8ValidateSlice(data)) refuse("{s} is not UTF-8 text", .{path});
         const root = modulefile.parseRoot(data);
         complete = root != null and root.?.path.len > 0 and generationComplete(a, root.?.path);
-        described.append(a, .{ .key = "syntax", .value = if (root) |r| Py.s(@tagName(r.syntax)) else .null }) catch {};
-        described.append(a, .{ .key = "root", .value = if (root) |r| Py.s(r.path) else .null }) catch {};
-        described.append(a, .{ .key = "root_kind", .value = if (root) |r| (if (r.path.len > 0) Py.s(lstatKind(r.path)) else .null) else .null }) catch {};
-        described.append(a, .{ .key = "complete", .value = .{ .bool = complete } }) catch {};
+        described.append(a, .{ .key = "syntax", .value = if (root) |r| Py.s(@tagName(r.syntax)) else .null }) catch oom();
+        described.append(a, .{ .key = "root", .value = if (root) |r| Py.s(r.path) else .null }) catch oom();
+        described.append(a, .{ .key = "root_kind", .value = if (root) |r| (if (r.path.len > 0) Py.s(lstatKind(r.path)) else .null) else .null }) catch oom();
+        described.append(a, .{ .key = "complete", .value = .{ .bool = complete } }) catch oom();
     }
     const out = json.dumps(a, .{ .dict = described.items }, 2, true) catch return 1;
     cli.put(1, out);
@@ -298,7 +299,7 @@ pub fn loadJournal(a: Allocator, path: []const u8) Py {
         needsIntervention("journal schema {d} is a generation-pointer record{s}; this program publishes by directory swap and will not apply it", .{ sch_int.?, if (sch_int == 3) " and carries that line's ledger policy" else "" });
     }
     var shown: std.ArrayList(u8) = .empty;
-    pyfmt.repr(&shown, a, sch orelse .null) catch {};
+    pyfmt.repr(&shown, a, sch orelse .null) catch oom();
     if (sch_int == ledger_schema) {
         const publ = pyfmt.get(j, "publication");
         const is_swap = publ != null and publ.? == .str and std.mem.eql(u8, publ.?.str, "directory-swap");
@@ -316,7 +317,7 @@ pub fn requireDirectorySwap(a: Allocator, j: Py) void {
         const ok = p == .null or (p == .str and std.mem.eql(u8, p.str, "directory-swap"));
         if (!ok) {
             var shown: std.ArrayList(u8) = .empty;
-            pyfmt.repr(&shown, a, p) catch {};
+            pyfmt.repr(&shown, a, p) catch oom();
             needsIntervention("journal publication {s} is not a directory swap", .{shown.items});
         }
     }
@@ -350,19 +351,19 @@ pub fn listJournals(a: Allocator, state_root: []const u8) []const Py {
     defer sys.close(fd);
     var names: std.ArrayList([]const u8) = .empty;
     var it = fsx.DirIter.init(a, fd) catch return &.{};
-    while (it.next() catch |err| refuse("{s}", .{osError(a, err, runs)})) |e| names.append(a, a.dupe(u8, e.name) catch continue) catch {};
+    while (it.next() catch |err| refuse("{s}", .{osError(a, err, runs)})) |e| names.append(a, a.dupe(u8, e.name) catch continue) catch oom();
     std.mem.sort([]const u8, names.items, {}, lessName);
     for (names.items) |n| {
         const p = std.fs.path.join(a, &.{ runs, n, "journal.json" }) catch continue;
         const st = fsx.statAt(fsx.cwd, p, false) catch continue;
         if (!st.isReg()) continue;
-        found.append(a, loadJournal(a, p)) catch {};
+        found.append(a, loadJournal(a, p)) catch oom();
     }
     return found.items;
 }
 
 fn line(a: Allocator, buf: *std.ArrayList(u8)) void {
-    buf.append(a, '\n') catch {};
+    buf.append(a, '\n') catch oom();
     cli.put(1, buf.items);
     buf.clearRetainingCapacity();
 }
@@ -373,13 +374,13 @@ fn cmdStatus(a: Allocator, args: []const []const u8) u8 {
     const pos = parseOpts(a, args, &opts, status_help, status_usage, prog ++ " status", &extra);
     if (opts[0].value == null) usageError(status_usage, prog ++ " status", "the following arguments are required: --state-root", .{});
     var all_extra = extra;
-    if (pos.len > 1) for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    if (pos.len > 1) for (pos[1..]) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     var journals = listJournals(a, opts[0].value.?);
     if (pos.len > 0) {
         const want = pos[0];
         var keep: std.ArrayList(Py) = .empty;
-        for (journals) |j| if (pyfmt.get(j, "run_id")) |r| if (r == .str and std.mem.eql(u8, r.str, want)) keep.append(a, j) catch {};
+        for (journals) |j| if (pyfmt.get(j, "run_id")) |r| if (r == .str and std.mem.eql(u8, r.str, want)) keep.append(a, j) catch oom();
         journals = keep.items;
         if (journals.len == 0) refuse("no journal for {s}", .{want});
     }
@@ -391,14 +392,14 @@ fn cmdStatus(a: Allocator, args: []const []const u8) u8 {
     for (journals) |j| {
         const kind = pyfmt.get(j, "kind");
         if (kind != null and kind.? == .str and std.mem.eql(u8, kind.?.str, "retire")) {
-            pyfmt.str(&b, a, pyfmt.get(j, "run_id")) catch {};
-            b.appendSlice(a, "  ") catch {};
-            pyfmt.str(&b, a, pyfmt.get(j, "state")) catch {};
-            b.appendSlice(a, "  retire  ") catch {};
-            pyfmt.str(&b, a, pyfmt.get(j, "module_path")) catch {};
+            pyfmt.str(&b, a, pyfmt.get(j, "run_id")) catch oom();
+            b.appendSlice(a, "  ") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(j, "state")) catch oom();
+            b.appendSlice(a, "  retire  ") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(j, "module_path")) catch oom();
             line(a, &b);
-            b.appendSlice(a, "  software directory ") catch {};
-            pyfmt.str(&b, a, pyfmt.get(j, "software_dir")) catch {};
+            b.appendSlice(a, "  software directory ") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(j, "software_dir")) catch oom();
             line(a, &b);
             continue;
         }
@@ -414,27 +415,27 @@ fn cmdStatus(a: Allocator, args: []const []const u8) u8 {
                 published += 1;
             };
         }
-        pyfmt.str(&b, a, pyfmt.get(j, "run_id")) catch {};
-        b.appendSlice(a, "  ") catch {};
-        pyfmt.str(&b, a, pyfmt.get(j, "state")) catch {};
-        b.appendSlice(a, "  backend=") catch {};
-        pyfmt.str(&b, a, pyfmt.get(j, "backend")) catch {};
-        b.print(a, "  modules={d}/{d}", .{ published, mods.len }) catch {};
+        pyfmt.str(&b, a, pyfmt.get(j, "run_id")) catch oom();
+        b.appendSlice(a, "  ") catch oom();
+        pyfmt.str(&b, a, pyfmt.get(j, "state")) catch oom();
+        b.appendSlice(a, "  backend=") catch oom();
+        pyfmt.str(&b, a, pyfmt.get(j, "backend")) catch oom();
+        b.print(a, "  modules={d}/{d}", .{ published, mods.len }) catch oom();
         line(a, &b);
         if (pyfmt.truthy(pyfmt.get(j, "message"))) {
-            b.appendSlice(a, "  ") catch {};
-            pyfmt.str(&b, a, pyfmt.get(j, "message")) catch {};
+            b.appendSlice(a, "  ") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(j, "message")) catch oom();
             line(a, &b);
         }
         for (mods) |m| {
-            b.appendSlice(a, "  ") catch {};
+            b.appendSlice(a, "  ") catch oom();
             pyfmt.leftPad(&b, a, pyfmt.get(m, "status"), 10) catch typeError("unsupported format string passed to the status value's __format__");
-            b.append(a, ' ') catch {};
-            pyfmt.str(&b, a, pyfmt.get(m, "rel")) catch {};
-            b.appendSlice(a, "  live=") catch {};
-            pyfmt.str(&b, a, pyfmt.get(m, "live_software")) catch {};
-            b.appendSlice(a, " retired=") catch {};
-            pyfmt.str(&b, a, pyfmt.get(m, "retired")) catch {};
+            b.append(a, ' ') catch oom();
+            pyfmt.str(&b, a, pyfmt.get(m, "rel")) catch oom();
+            b.appendSlice(a, "  live=") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(m, "live_software")) catch oom();
+            b.appendSlice(a, " retired=") catch oom();
+            pyfmt.str(&b, a, pyfmt.get(m, "retired")) catch oom();
             line(a, &b);
         }
     }
@@ -523,11 +524,11 @@ fn cmdRetire(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     var extra: std.ArrayList([]const u8) = .empty;
     const pos = parseOpts(a, args, &opts, retire_help, retire_usage, who, &extra);
     var need: std.ArrayList([]const u8) = .empty;
-    if (opts[0].value == null) need.append(a, "--state-root") catch {};
-    if (opts[1].value == null) need.append(a, "--module-file") catch {};
+    if (opts[0].value == null) need.append(a, "--state-root") catch oom();
+    if (opts[1].value == null) need.append(a, "--module-file") catch oom();
     missing(a, retire_usage, who, need.items);
     var all_extra = extra;
-    for (pos) |p| all_extra.append(a, p) catch {};
+    for (pos) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const timeout: f64 = if (opts[4].value) |v| floatArg(retire_usage, who, "lock-timeout", v) else 0;
     var ctx = adminCtx(a, env);
@@ -543,11 +544,11 @@ fn cmdRollback(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     var extra: std.ArrayList([]const u8) = .empty;
     const pos = parseOpts(a, args, &opts, rollback_help, rollback_usage, who, &extra);
     var need: std.ArrayList([]const u8) = .empty;
-    if (opts[0].value == null) need.append(a, "--state-root") catch {};
-    if (pos.len == 0) need.append(a, "run_id") catch {};
+    if (opts[0].value == null) need.append(a, "--state-root") catch oom();
+    if (pos.len == 0) need.append(a, "run_id") catch oom();
     missing(a, rollback_usage, who, need.items);
     var all_extra = extra;
-    for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    for (pos[1..]) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const timeout: ?f64 = if (opts[1].value) |v| floatArg(rollback_usage, who, "lock-timeout", v) else null;
     var ctx = adminCtx(a, env);
@@ -567,7 +568,7 @@ fn cmdGc(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     const pos = parseOpts(a, args, &opts, gc_help, gc_usage, who, &extra);
     if (opts[0].value == null) missing(a, gc_usage, who, &.{"--state-root"});
     var all_extra = extra;
-    for (pos) |p| all_extra.append(a, p) catch {};
+    for (pos) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const grace: f64 = if (opts[1].value) |v| floatArg(gc_usage, who, "grace-hours", v) else blk: {
         const e = env.get("EB_STAGED_REBUILD_GRACE_HOURS") orelse break :blk admin.default_grace_hours;
@@ -622,8 +623,8 @@ fn cmdRun(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
         if (count > 1) {
             var amb: std.ArrayList(u8) = .empty;
             for (names) |n| if (std.mem.startsWith(u8, n, name)) {
-                if (amb.items.len > 0) amb.appendSlice(a, ", ") catch {};
-                amb.print(a, "--{s}", .{n}) catch {};
+                if (amb.items.len > 0) amb.appendSlice(a, ", ") catch oom();
+                amb.print(a, "--{s}", .{n}) catch oom();
             };
             usageError(run_usage, who, "ambiguous option: --{s} could match {s}", .{ name, amb.items });
         }
@@ -642,7 +643,7 @@ fn cmdRun(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
             i += 1;
             v = args[i];
         }
-        if (std.mem.eql(u8, names[k], "module")) modules_list.append(a, v) catch {} else vals[k] = v;
+        if (std.mem.eql(u8, names[k], "module")) modules_list.append(a, v) catch oom() else vals[k] = v;
     }
     if (vals[4]) |b| if (!engine_inList(&backends, b))
         usageError(run_usage, who, "argument --backend: invalid choice: '{s}' (choose from 'auto', 'bwrap', 'userns', 'installpath')", .{b});
@@ -721,11 +722,11 @@ fn cmdResume(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     var extra: std.ArrayList([]const u8) = .empty;
     const pos = parseOpts(a, args, &opts, resume_help, resume_usage, who, &extra);
     var need: std.ArrayList([]const u8) = .empty;
-    if (opts[0].value == null) need.append(a, "--state-root") catch {};
-    if (pos.len == 0) need.append(a, "run_id") catch {};
+    if (opts[0].value == null) need.append(a, "--state-root") catch oom();
+    if (pos.len == 0) need.append(a, "run_id") catch oom();
     missing(a, resume_usage, who, need.items);
     var all_extra = extra;
-    for (pos[1..]) |p| all_extra.append(a, p) catch {};
+    for (pos[1..]) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const timeout: ?f64 = if (opts[1].value) |v| floatArg(resume_usage, who, "lock-timeout", v) else null;
     var ctx = adminCtx(a, env);
@@ -748,7 +749,7 @@ fn cmdProbe(a: Allocator, args: []const []const u8, env: probe.Env) u8 {
     var extra: std.ArrayList([]const u8) = .empty;
     const pos = parseOpts(a, args, &opts, probe_help, probe_usage, prog ++ " probe", &extra);
     var all_extra = extra;
-    for (pos) |p| all_extra.append(a, p) catch {};
+    for (pos) |p| all_extra.append(a, p) catch oom();
     unrecognized(a, all_extra.items);
     const eb_default = env.get("EB_STAGED_REBUILD_EB") orelse "eb";
     const eb = opts[1].value orelse eb_default;

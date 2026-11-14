@@ -6,6 +6,7 @@
 //! operation keeps its state and outbox in its own directory; a retry never
 //! repeats a command that already ran.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const main_mod = @import("main.zig");
@@ -75,11 +76,11 @@ fn set(a: Allocator, d: Py, k: []const u8, v: Py) Py {
     var found = false;
     if (d == .dict) for (d.dict) |e| {
         if (std.mem.eql(u8, e.key, k)) {
-            out.append(a, .{ .key = e.key, .value = v }) catch {};
+            out.append(a, .{ .key = e.key, .value = v }) catch oom();
             found = true;
-        } else out.append(a, e) catch {};
+        } else out.append(a, e) catch oom();
     };
-    if (!found) out.append(a, .{ .key = k, .value = v }) catch {};
+    if (!found) out.append(a, .{ .key = k, .value = v }) catch oom();
     return .{ .dict = out.items };
 }
 
@@ -444,11 +445,11 @@ fn baseRecord(a: Allocator, meta: Py, stage: []const u8, now: f64) Py {
         .{ .key = "operation", .value = Py.s(op) },
         .{ .key = "producer", .value = Py.s(producer) },
         .{ .key = "cpu_target", .value = get(target, "cpu").? },
-    }) catch {};
-    if (has(target, "accelerator")) build.append(a, .{ .key = "accelerator", .value = get(target, "accelerator").? }) catch {};
-    if (has(meta, "tool")) build.append(a, .{ .key = "tool", .value = get(meta, "tool").? }) catch {};
+    }) catch oom();
+    if (has(target, "accelerator")) build.append(a, .{ .key = "accelerator", .value = get(target, "accelerator").? }) catch oom();
+    if (has(meta, "tool")) build.append(a, .{ .key = "tool", .value = get(meta, "tool").? }) catch oom();
     const logs = get(meta, "logs").?;
-    if (logs.list.len > 0) build.append(a, .{ .key = "logs", .value = logs }) catch {};
+    if (logs.list.len > 0) build.append(a, .{ .key = "logs", .value = logs }) catch oom();
     var rec = dict(a, &.{
         .{ .key = "ts", .value = Py.s(utc(a, now)) },
         .{ .key = "actor", .value = get(meta, "actor").? },
@@ -490,7 +491,7 @@ fn postBuild(a: Allocator, meta: Py, fields: *std.ArrayList(Py.Entry)) ?Problem 
         const h = hashFile(a, path, &problem) orelse return .{ .kind = "modulefile-unreadable", .text = std.fmt.allocPrint(a, "module file {s} cannot be hashed: {s}", .{ path, problem }) catch "" };
         if (has(mf, "sha256") and !std.mem.eql(u8, s(get(mf, "sha256")), h.digest))
             return .{ .kind = "modulefile-mismatch", .text = std.fmt.allocPrint(a, "module file {s} hashes to {s}, not the supplied {s}", .{ path, h.digest, s(get(mf, "sha256")) }) catch "" };
-        fields.append(a, .{ .key = "modulefile", .value = dict(a, &.{ .{ .key = "path", .value = Py.s(path) }, .{ .key = "sha256", .value = Py.s(h.digest) } }) }) catch {};
+        fields.append(a, .{ .key = "modulefile", .value = dict(a, &.{ .{ .key = "path", .value = Py.s(path) }, .{ .key = "sha256", .value = Py.s(h.digest) } }) }) catch oom();
     }
     if (has(meta, "artifact")) {
         var art = get(meta, "artifact").?;
@@ -504,7 +505,7 @@ fn postBuild(a: Allocator, meta: Py, fields: *std.ArrayList(Py.Entry)) ?Problem 
                 return .{ .kind = "artifact-mismatch", .text = std.fmt.allocPrint(a, "artifact {s} is {s}, not the supplied {s}", .{ path, accession, s(get(art, "accession")) }) catch "" };
             art = set(a, art, "size", .{ .int = @intCast(h.size) });
         }
-        fields.append(a, .{ .key = "artifact", .value = art }) catch {};
+        fields.append(a, .{ .key = "artifact", .value = art }) catch oom();
     }
     return null;
 }
@@ -514,7 +515,7 @@ fn reason(a: Allocator, status: Py) []const u8 {
     if (std.mem.eql(u8, outcome, "unknown")) return "the producer stopped while the command ran; the command's result is unknown";
     if (std.mem.eql(u8, outcome, "not-started")) return "the command could not be started";
     var b: std.ArrayList(u8) = .empty;
-    pyfmt.str(&b, a, get(status, "exit_status")) catch {};
+    pyfmt.str(&b, a, get(status, "exit_status")) catch oom();
     return std.fmt.allocPrint(a, "the command exited {s}", .{b.items}) catch "";
 }
 
@@ -581,11 +582,11 @@ const Op = struct {
     fn init(a: Allocator, env: probe.Env, ctx: *admin.Ctx, config: Py, meta: Py) Op {
         const dir = std.fs.path.join(a, &.{ s(get(config, "outbox")), s(get(meta, "operation")) }) catch "";
         var ledger: std.ArrayList(Py.Entry) = .empty;
-        for ([_][]const u8{ "eb_stack", "log", "key", "timeout", "required" }) |k| ledger.append(a, .{ .key = k, .value = get(config, k).? }) catch {};
-        if (has(config, "public_key")) ledger.append(a, .{ .key = "public_key", .value = get(config, "public_key").? }) catch {};
-        ledger.append(a, .{ .key = "head", .value = Py.s(std.fs.path.join(a, &.{ dir, "head.json" }) catch "") }) catch {};
+        for ([_][]const u8{ "eb_stack", "log", "key", "timeout", "required" }) |k| ledger.append(a, .{ .key = k, .value = get(config, k).? }) catch oom();
+        if (has(config, "public_key")) ledger.append(a, .{ .key = "public_key", .value = get(config, "public_key").? }) catch oom();
+        ledger.append(a, .{ .key = "head", .value = Py.s(std.fs.path.join(a, &.{ dir, "head.json" }) catch "") }) catch oom();
         var policy: std.ArrayList(Py.Entry) = .empty;
-        for (policy_keys) |k| if (get(config, k)) |v| policy.append(a, .{ .key = k, .value = v }) catch {};
+        for (policy_keys) |k| if (get(config, k)) |v| policy.append(a, .{ .key = k, .value = v }) catch oom();
         return .{ .a = a, .env = env, .ctx = ctx, .config = config, .meta = meta, .dir = dir, .path = std.fs.path.join(a, &.{ dir, "operation.json" }) catch "", .ledger = .{ .dict = ledger.items }, .policy = .{ .dict = policy.items } };
     }
 
@@ -671,7 +672,7 @@ const Outcome = struct { code: u8, message: []const u8 };
 
 fn pendingText(a: Allocator, left: []const Py) []const u8 {
     var e: std.ArrayList(u8) = .empty;
-    pyfmt.str(&e, a, get(left[0], "error")) catch {};
+    pyfmt.str(&e, a, get(left[0], "error")) catch oom();
     return std.fmt.allocPrint(a, "{d} ledger event(s) not acknowledged ({s})", .{ left.len, e.items }) catch "";
 }
 
@@ -893,8 +894,8 @@ pub fn main(a: Allocator, args_in: []const []const u8, env: probe.Env) u8 {
     }
     if (config_path == null or metadata_path == null) {
         var need: std.ArrayList([]const u8) = .empty;
-        if (config_path == null) need.append(a, "--config") catch {};
-        if (metadata_path == null) need.append(a, "--metadata") catch {};
+        if (config_path == null) need.append(a, "--config") catch oom();
+        if (metadata_path == null) need.append(a, "--metadata") catch oom();
         cli.put(2, usage);
         cli.err("{s}: error: the following arguments are required: {s}\n", .{ who, std.mem.join(a, ", ", need.items) catch "" });
         return 2;
