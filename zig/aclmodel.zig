@@ -71,7 +71,7 @@ fn parseFault(spec: []const u8) Fault {
     var f: Fault = .{};
     var it = std.mem.splitScalar(u8, spec, ',');
     while (it.next()) |kv| {
-        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, kv, '=') orelse continue;
         const k = kv[0..eq];
         const v = kv[eq + 1 ..];
         if (std.mem.eql(u8, k, "op")) f.op = v;
@@ -144,7 +144,7 @@ fn save(s: Store) void {
     for (s.keys(), s.values()) |key, at| for (at, 0..) |v, i| if (v) |bytes| {
         out.print(A(), "{s} {s} {x}\n", .{ key, names[i], bytes }) catch return;
     };
-    const tmp = std.fmt.allocPrint(A(), "{s}.tmp", .{store_path}) catch return;
+    const tmp = A().print("{s}.tmp", .{store_path}) catch return;
     const fd = sys.openat(fsx.cwd, tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600) catch return;
     sys.writeAll(fd, out.items) catch {};
     sys.close(fd);
@@ -155,7 +155,7 @@ fn keyOf(fd: sys.fd_t) []const u8 {
     const st = fsx.fstat(fd) catch return "?";
     // MAJOR:MINOR:INO, as the test's Python side writes it; st_dev encodes
     // the device differently in Python and in zig-common.
-    return std.fmt.allocPrint(A(), "{d}:{d}:{d}", .{ st.dev >> 32, st.dev & 0xffffffff, st.ino }) catch "?";
+    return A().print("{d}:{d}:{d}", .{ st.dev >> 32, st.dev & 0xffffffff, st.ino }) catch "?";
 }
 
 fn attrsOf(s: *Store, fd: sys.fd_t) *Attrs {
@@ -183,7 +183,7 @@ fn err(e: linux.E) usize {
 
 fn fdPath(fd: sys.fd_t) []const u8 {
     var buf: [sys.path_max]u8 = undefined;
-    const link = std.fmt.allocPrint(A(), "/proc/self/fd/{d}\x00", .{fd}) catch return "";
+    const link = A().print("/proc/self/fd/{d}\x00", .{fd}) catch return "";
     const n = linux.readlinkat(linux.AT.FDCWD, @ptrCast(link.ptr), &buf, buf.len);
     if (linux.errno(n) != .SUCCESS) return "";
     return A().dupe(u8, buf[0..n]) catch "";
@@ -275,7 +275,7 @@ fn mChmod(fd: sys.fd_t, mode: u32) usize {
     var s = load();
     const at = attrsOf(&s, fd);
     if (model.chmod_rewrites and at[model.native] != null) {
-        writeNative(at, std.fmt.allocPrint(A(), "chmod-regenerated:{o}", .{mode}) catch unreachable);
+        writeNative(at, A().print("chmod-regenerated:{o}", .{mode}) catch unreachable);
         save(s);
     }
     return rc;

@@ -23,13 +23,13 @@ pub const Why = struct { msg: []const u8 = "" };
 pub const Error = error{ Refused, NeedsIntervention, Failed };
 
 fn fail(a: Allocator, why: *Why, comptime kind: Error, comptime f: []const u8, args: anytype) Error {
-    why.msg = std.fmt.allocPrint(a, f, args) catch "swap failed";
+    why.msg = a.print(f, args) catch "swap failed";
     return kind;
 }
 
 /// A step a test made fail: Python's OSError(EIO, "injected failure at STEP").
 fn injectedText(a: Allocator, step: []const u8) []const u8 {
-    return std.fmt.allocPrint(a, "[Errno 5] injected failure at {s}", .{step}) catch "swap failed";
+    return a.print("[Errno 5] injected failure at {s}", .{step}) catch "swap failed";
 }
 
 fn injected(a: Allocator, why: *Why, step: []const u8) Error {
@@ -96,7 +96,7 @@ fn restoreFallback(a: Allocator, live: []const u8, staged: []const u8, hold: []c
 pub fn recoverInterrupted(a: Allocator, live_in: []const u8, staged_in: []const u8, why: *Why) Error!void {
     const live = admin.abspath(a, live_in);
     const staged = admin.abspath(a, staged_in);
-    const hold = std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{staged}) catch return error.Failed;
+    const hold = a.print("{s}" ++ fallback_hold_suffix, .{staged}) catch return error.Failed;
     try restoreFallback(a, live, staged, hold, why);
     if (!std.mem.eql(u8, kindOf(hold), "missing")) return fail(a, why, error.NeedsIntervention, "fallback recovery left its hold path behind: {s}", .{hold});
 }
@@ -127,11 +127,11 @@ pub fn swapDirectories(a: Allocator, live_in: []const u8, staged_in: []const u8,
         if (!std.mem.eql(u8, k, "dir")) return fail(a, why, error.Refused, "{s} swap path is {s}, not a real directory: {s}", .{ pair[0], k, pair[1] });
     }
     if (allow_exchange) {
-        const before = std.fmt.allocPrint(a, "{s}.exchange.before", .{step_prefix}) catch step_prefix;
+        const before = a.print("{s}.exchange.before", .{step_prefix}) catch step_prefix;
         if (faults.fails(before)) return injected(a, why, before);
         const e = exchange(a, live, staged);
         if (e == .SUCCESS) {
-            const after = std.fmt.allocPrint(a, "{s}.exchange.after", .{step_prefix}) catch step_prefix;
+            const after = a.print("{s}.exchange.after", .{step_prefix}) catch step_prefix;
             const synced = if (faults.fails(after)) injected(a, why, after) else syncParent(a, live, why);
             synced catch |err| {
                 // Undo the exchange before reporting the failure.
@@ -144,22 +144,22 @@ pub fn swapDirectories(a: Allocator, live_in: []const u8, staged_in: []const u8,
         if (e != .INVAL and e != .NOSYS and e != .OPNOTSUPP)
             return fail(a, why, error.Failed, "[Errno {d}] renameat2(RENAME_EXCHANGE): {s}", .{ @backingInt(e), strerror(e) });
     }
-    const hold = std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{staged}) catch return error.Failed;
+    const hold = a.print("{s}" ++ fallback_hold_suffix, .{staged}) catch return error.Failed;
     if (!std.mem.eql(u8, kindOf(hold), "missing")) try recoverInterrupted(a, live, staged, why);
     fallback: {
-        const live_to_hold = std.fmt.allocPrint(a, "{s}.fallback.live-to-hold", .{step_prefix}) catch step_prefix;
+        const live_to_hold = a.print("{s}.fallback.live-to-hold", .{step_prefix}) catch step_prefix;
         if (faults.fails(live_to_hold)) {
             why.msg = injectedText(a, live_to_hold);
             break :fallback;
         }
         renamePath(a, live, hold, why) catch break :fallback;
-        const staged_to_live = std.fmt.allocPrint(a, "{s}.fallback.staged-to-live", .{step_prefix}) catch step_prefix;
+        const staged_to_live = a.print("{s}.fallback.staged-to-live", .{step_prefix}) catch step_prefix;
         if (faults.fails(staged_to_live)) {
             why.msg = injectedText(a, staged_to_live);
             break :fallback;
         }
         renamePath(a, staged, live, why) catch break :fallback;
-        const hold_to_staged = std.fmt.allocPrint(a, "{s}.fallback.hold-to-staged", .{step_prefix}) catch step_prefix;
+        const hold_to_staged = a.print("{s}.fallback.hold-to-staged", .{step_prefix}) catch step_prefix;
         if (faults.fails(hold_to_staged)) {
             why.msg = injectedText(a, hold_to_staged);
             break :fallback;
@@ -180,18 +180,18 @@ test "swap exchanges two sibling directories and back" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const base = try std.fmt.allocPrint(a, "/tmp/esr-swap-{d}", .{linux.getpid()});
+    const base = try a.print("/tmp/esr-swap-{d}", .{linux.getpid()});
     defer common.fsx.deleteTree(a, common.fsx.cwd, base) catch {};
-    const live = try std.fmt.allocPrint(a, "{s}/live", .{base});
-    const staged = try std.fmt.allocPrint(a, "{s}/.live.new", .{base});
-    try atomic.makedirs(try std.fmt.allocPrint(a, "{s}/L", .{live}));
-    try atomic.makedirs(try std.fmt.allocPrint(a, "{s}/S", .{staged}));
+    const live = try a.print("{s}/live", .{base});
+    const staged = try a.print("{s}/.live.new", .{base});
+    try atomic.makedirs(try a.print("{s}/L", .{live}));
+    try atomic.makedirs(try a.print("{s}/S", .{staged}));
     var why: Why = .{};
     for ([_]bool{ true, false }) |allow| {
         _ = try swapDirectories(a, live, staged, allow, .{}, "swap", &why);
-        try std.testing.expectEqualStrings("dir", kindOf(try std.fmt.allocPrint(a, "{s}/S", .{live})));
+        try std.testing.expectEqualStrings("dir", kindOf(try a.print("{s}/S", .{live})));
         _ = try swapDirectories(a, live, staged, allow, .{}, "swap", &why);
-        try std.testing.expectEqualStrings("dir", kindOf(try std.fmt.allocPrint(a, "{s}/L", .{live})));
+        try std.testing.expectEqualStrings("dir", kindOf(try a.print("{s}/L", .{live})));
     }
     try std.testing.expectError(error.Refused, swapDirectories(a, live, base, true, .{}, "swap", &why));
 }
@@ -204,20 +204,20 @@ const testing = std.testing;
 const Pair = struct { base: []const u8, live: []const u8, staged: []const u8 };
 
 fn testPair(a: Allocator, name: []const u8) !Pair {
-    const base = try std.fmt.allocPrint(a, "/tmp/esr-swap-{s}-{d}", .{ name, linux.getpid() });
+    const base = try a.print("/tmp/esr-swap-{s}-{d}", .{ name, linux.getpid() });
     common.fsx.deleteTree(a, common.fsx.cwd, base) catch {};
-    const live = try std.fmt.allocPrint(a, "{s}/live", .{base});
-    const staged = try std.fmt.allocPrint(a, "{s}/.live.staged", .{base});
+    const live = try a.print("{s}/live", .{base});
+    const staged = try a.print("{s}/.live.staged", .{base});
     try atomic.makedirs(live);
     try atomic.makedirs(staged);
     var why: atomic.Why = .{};
-    try atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{live}), "old\n", .{}, &why);
-    try atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{staged}), "new\n", .{}, &why);
+    try atomic.atomicWrite(a, try a.print("{s}/PAYLOAD", .{live}), "old\n", .{}, &why);
+    try atomic.atomicWrite(a, try a.print("{s}/PAYLOAD", .{staged}), "new\n", .{}, &why);
     return .{ .base = base, .live = live, .staged = staged };
 }
 
 fn payload(a: Allocator, dir: []const u8) ![]const u8 {
-    const f = try common.fsx.openRegular(common.fsx.cwd, try std.fmt.allocPrint(a, "{s}/PAYLOAD", .{dir}), false);
+    const f = try common.fsx.openRegular(common.fsx.cwd, try a.print("{s}/PAYLOAD", .{dir}), false);
     defer sys.close(f.fd);
     return common.fsx.readAll(a, f.fd, 64);
 }
@@ -225,7 +225,7 @@ fn payload(a: Allocator, dir: []const u8) ![]const u8 {
 fn expectOriginal(a: Allocator, p: Pair) !void {
     try testing.expectEqualStrings("old\n", try payload(a, p.live));
     try testing.expectEqualStrings("new\n", try payload(a, p.staged));
-    try testing.expectEqualStrings("missing", kindOf(try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged})));
+    try testing.expectEqualStrings("missing", kindOf(try a.print("{s}" ++ fallback_hold_suffix, .{p.staged})));
 }
 
 var failing_call: usize = 0;
@@ -324,7 +324,7 @@ test "recovery after the first fallback rename" {
     const a = arena_state.allocator();
     const p = try testPair(a, "recover1");
     defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
-    const hold = try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged});
+    const hold = try a.print("{s}" ++ fallback_hold_suffix, .{p.staged});
     try realRename(p.live, hold);
     var why: Why = .{};
     try recoverInterrupted(a, p.live, p.staged, &why);
@@ -337,7 +337,7 @@ test "recovery after the second fallback rename" {
     const a = arena_state.allocator();
     const p = try testPair(a, "recover2");
     defer common.fsx.deleteTree(a, common.fsx.cwd, p.base) catch {};
-    const hold = try std.fmt.allocPrint(a, "{s}" ++ fallback_hold_suffix, .{p.staged});
+    const hold = try a.print("{s}" ++ fallback_hold_suffix, .{p.staged});
     try realRename(p.live, hold);
     try realRename(p.staged, p.live);
     var why: Why = .{};

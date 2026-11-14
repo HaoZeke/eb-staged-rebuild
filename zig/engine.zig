@@ -63,7 +63,7 @@ pub fn filterEbArgs(a: Allocator, args: []const []const u8) []const []const u8 {
             i += 1;
             continue;
         }
-        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const eq = std.mem.findScalar(u8, arg, '=');
         const name = arg[0 .. eq orelse arg.len];
         if (inList(&drop_flags, name)) {
             i += 1;
@@ -82,7 +82,7 @@ pub fn filterEbArgs(a: Allocator, args: []const []const u8) []const []const u8 {
 /// ensure_rebuild: add --rebuild unless --rebuild, --force or -f is there.
 pub fn ensureRebuild(a: Allocator, args: []const []const u8) []const []const u8 {
     for (args) |arg| {
-        const name = arg[0 .. std.mem.indexOfScalar(u8, arg, '=') orelse arg.len];
+        const name = arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len];
         if (std.mem.eql(u8, name, "--rebuild") or std.mem.eql(u8, name, "--force") or std.mem.eql(u8, name, "-f")) return args;
     }
     var out = a.dupe([]const u8, args) catch return args;
@@ -110,14 +110,14 @@ fn buildCommand(a: Allocator, env: probe.Env, spec: Spec, probes: Py, generation
     const filtered = ensureRebuild(a, filterEbArgs(a, spec.eb_args));
     var cmd: std.ArrayList([]const u8) = .empty;
     if (std.mem.eql(u8, spec.backend, "bwrap")) {
-        cmd.appendSlice(a, &.{ spec.eb_executable, "--experimental", "--bwrap", std.fmt.allocPrint(a, "--bwrap-installpath={s}", .{generation_root}) catch "", "--bwrap-options=--die-with-parent" }) catch oom();
+        cmd.appendSlice(a, &.{ spec.eb_executable, "--experimental", "--bwrap", a.print("--bwrap-installpath={s}", .{generation_root}) catch "", "--bwrap-options=--die-with-parent" }) catch oom();
         cmd.appendSlice(a, filtered) catch oom();
         return join(a, cmd.items);
     }
     const software = std.fs.path.join(a, &.{ generation_root, "software" }) catch "";
     const modules = std.fs.path.join(a, &.{ generation_root, "modules" }) catch "";
     var inner: std.ArrayList([]const u8) = .empty;
-    inner.appendSlice(a, &.{ spec.eb_executable, std.fmt.allocPrint(a, "--installpath-software={s}", .{software}) catch "", std.fmt.allocPrint(a, "--installpath-modules={s}", .{modules}) catch "" }) catch oom();
+    inner.appendSlice(a, &.{ spec.eb_executable, a.print("--installpath-software={s}", .{software}) catch "", a.print("--installpath-modules={s}", .{modules}) catch "" }) catch oom();
     inner.appendSlice(a, filtered) catch oom();
     if (!std.mem.eql(u8, spec.backend, "userns")) return join(a, inner.items);
     const report = pyfmt.get(probes, "userns_sandbox");
@@ -204,7 +204,7 @@ fn dryRun(a: Allocator, env: probe.Env, spec: Spec, probes: Py) u8 {
     var lines: std.ArrayList([]const u8) = .empty;
     const fmt = struct {
         fn f(al: Allocator, comptime s: []const u8, args: anytype) []const u8 {
-            return std.fmt.allocPrint(al, s, args) catch "";
+            return al.print(s, args) catch "";
         }
     }.f;
     lines.append(a, fmt(a, "backend: {s}", .{spec.backend})) catch oom();

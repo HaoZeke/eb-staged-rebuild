@@ -67,7 +67,7 @@ fn tclAt(s: []const u8, start: usize) ?[]const u8 {
     const i = skipWs(s, after);
     if (i == after or i >= s.len) return null;
     if (s[i] == '"') {
-        if (std.mem.indexOfScalarPos(u8, s, i + 1, '"')) |close| {
+        if (std.mem.findScalarPos(u8, s, i + 1, '"')) |close| {
             if (tailOk(s, close + 1)) return s[i + 1 .. close];
         }
     }
@@ -84,7 +84,7 @@ pub fn parseRoot(s: []const u8) ?Root {
     while (start <= s.len) {
         if (luaAt(s, start)) |v| return .{ .syntax = .lua, .path = v };
         if (tclAt(s, start)) |v| return .{ .syntax = .tcl, .path = v };
-        const nl = std.mem.indexOfScalarPos(u8, s, start, '\n') orelse break;
+        const nl = std.mem.findScalarPos(u8, s, start, '\n') orelse break;
         start = nl + 1;
     }
     return null;
@@ -118,7 +118,7 @@ fn luaLoadAt(s: []const u8, p: usize) ?struct { name: []const u8, end: usize } {
     for ([_][]const u8{ "load(\"", "depends_on(\"" }) |lead| {
         if (std.mem.startsWith(u8, s[i..], lead)) {
             i += lead.len;
-            const close = std.mem.indexOfScalarPos(u8, s, i, '"') orelse return null;
+            const close = std.mem.findScalarPos(u8, s, i, '"') orelse return null;
             if (close == i or close + 1 >= s.len or s[close + 1] != ')') return null;
             return .{ .name = s[i..close], .end = close + 2 };
         }
@@ -194,7 +194,7 @@ pub fn moduleIdentity(a: Allocator, modules_root: []const u8, module_path: []con
 fn splitextStem(name: []const u8) []const u8 {
     var lead: usize = 0;
     while (lead < name.len and name[lead] == '.') lead += 1;
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
+    const dot = std.mem.findScalarLast(u8, name, '.') orelse return name;
     if (dot < lead) return name;
     return name[0..dot];
 }
@@ -230,7 +230,7 @@ pub fn replacePath(a: Allocator, text: []const u8, old: []const u8, new: []const
         why.* = "refusing to rewrite an empty root";
         return error.Refused;
     }
-    if (std.mem.indexOfAny(u8, new, "\n\"\x00") != null) {
+    if (std.mem.findAny(u8, new, "\n\"\x00") != null) {
         why.* = "refusing to write a root that contains a quote, newline, or NUL";
         return error.Refused;
     }
@@ -253,7 +253,7 @@ pub fn replacePath(a: Allocator, text: []const u8, old: []const u8, new: []const
         i += 1;
     }
     if (count < 1) {
-        why.* = try std.fmt.allocPrint(a, "module file does not contain the install path {s}", .{old});
+        why.* = try a.print("module file does not contain the install path {s}", .{old});
         return error.Refused;
     }
     return std.mem.replaceOwned(u8, a, out.items, token, new);
@@ -273,7 +273,7 @@ pub fn rewriteRoot(a: Allocator, text: []const u8, new_root: []const u8, why: *[
     const again = parseRoot(updated);
     if (again == null or again.?.syntax != r.syntax or !std.mem.eql(u8, again.?.path, new_root)) {
         const got = if (again) |g| g.path else "None";
-        why.* = try std.fmt.allocPrint(a, "rewritten module file root is '{s}', expected {s}", .{ got, new_root });
+        why.* = try a.print("rewritten module file root is '{s}', expected {s}", .{ got, new_root });
         return error.Refused;
     }
     return updated;

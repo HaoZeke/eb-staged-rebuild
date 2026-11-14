@@ -37,7 +37,7 @@ fn readlink(a: Allocator, path: []const u8) []const u8 {
 /// entered.
 pub fn walkModuleTree(a: Allocator, modules_root: []const u8, why: *[]const u8) Error!struct { files: []const []const u8, links: []const Link } {
     if (!std.mem.eql(u8, main_mod.lstatKind(modules_root), "dir")) {
-        why.* = try std.fmt.allocPrint(a, "module tree is not a real directory: {s}", .{modules_root});
+        why.* = try a.print("module tree is not a real directory: {s}", .{modules_root});
         return error.Refused;
     }
     var files: std.ArrayList([]const u8) = .empty;
@@ -90,12 +90,12 @@ pub fn swapInstallFor(a: Allocator, text: []const u8, stage_software: []const u8
         relative = modulefile.relpath(a, root_abs, live_abs);
         staged = try std.fs.path.join(a, &.{ stage_abs, relative });
     } else {
-        why.* = try std.fmt.allocPrint(a, "module root {s} is outside both the stage software tree {s} and the live software tree {s}", .{ root_abs, stage_abs, live_abs });
+        why.* = try a.print("module root {s} is outside both the stage software tree {s} and the live software tree {s}", .{ root_abs, stage_abs, live_abs });
         return error.Refused;
     }
     const live = if (std.mem.eql(u8, relative, ".")) live_abs else try std.fs.path.join(a, &.{ live_abs, relative });
     if (!std.mem.eql(u8, main_mod.lstatKind(staged), "dir")) {
-        why.* = try std.fmt.allocPrint(a, "staged installation is not a real directory: {s}", .{staged});
+        why.* = try a.print("staged installation is not a real directory: {s}", .{staged});
         return error.Refused;
     }
     const new_text = modulefile.rewriteRoot(a, text, live, why) catch |err| return switch (err) {
@@ -173,14 +173,14 @@ test "ordering puts dependencies first and maps links" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const base = try std.fmt.allocPrint(a, "/tmp/esr-discover-{d}", .{std.os.linux.getpid()});
+    const base = try a.print("/tmp/esr-discover-{d}", .{std.os.linux.getpid()});
     defer fsx.deleteTree(a, fsx.cwd, base) catch {};
-    const m = try std.fmt.allocPrint(a, "{s}/all", .{base});
-    try common.atomic.makedirs(try std.fmt.allocPrint(a, "{s}/zlib", .{m}));
-    try common.atomic.makedirs(try std.fmt.allocPrint(a, "{s}/app", .{m}));
+    const m = try a.print("{s}/all", .{base});
+    try common.atomic.makedirs(try a.print("{s}/zlib", .{m}));
+    try common.atomic.makedirs(try a.print("{s}/app", .{m}));
     var why: common.atomic.Why = .{};
-    try common.atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/app/1.lua", .{m}), "load(\"zlib/2\")\n", .{}, &why);
-    try common.atomic.atomicWrite(a, try std.fmt.allocPrint(a, "{s}/zlib/2.lua", .{m}), "whatis(\"z\")\n", .{}, &why);
+    try common.atomic.atomicWrite(a, try a.print("{s}/app/1.lua", .{m}), "load(\"zlib/2\")\n", .{}, &why);
+    try common.atomic.atomicWrite(a, try a.print("{s}/zlib/2.lua", .{m}), "whatis(\"z\")\n", .{}, &why);
     var w: []const u8 = "";
     const tree = try walkModuleTree(a, m, &w);
     try std.testing.expectEqual(@as(usize, 2), tree.files.len);

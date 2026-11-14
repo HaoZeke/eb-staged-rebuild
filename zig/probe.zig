@@ -60,7 +60,7 @@ const Ran = union(enum) {
 /// subprocess.run(text=True, timeout=...): the result, or the exception text.
 fn run(a: Allocator, env: Env, argv: []const []const u8, timeout_ms: u32) Ran {
     const exe = if (argv[0].len > 0 and argv[0][0] == '/') argv[0] else (which(a, env, argv[0]) orelse
-        return .{ .failed = std.fmt.allocPrint(a, "[Errno 2] No such file or directory: '{s}'", .{argv[0]}) catch "not found" });
+        return .{ .failed = a.print("[Errno 2] No such file or directory: '{s}'", .{argv[0]}) catch "not found" });
     const r = proc.run(a, exe, argv, env.envp, .{
         .stdout_limit = 16 << 20,
         .stderr_limit = 1 << 20,
@@ -68,8 +68,8 @@ fn run(a: Allocator, env: Env, argv: []const []const u8, timeout_ms: u32) Ran {
         .grace_ms = 0,
         .new_session = false,
     }) catch |err| return .{ .failed = switch (err) {
-        error.TimedOut => std.fmt.allocPrint(a, "Command '{s}' timed out after {d} seconds", .{ listRepr(a, argv), timeout_ms / 1000 }) catch "timed out",
-        else => std.fmt.allocPrint(a, "{t}", .{err}) catch "failed",
+        error.TimedOut => a.print("Command '{s}' timed out after {d} seconds", .{ listRepr(a, argv), timeout_ms / 1000 }) catch "timed out",
+        else => a.print("{t}", .{err}) catch "failed",
     } };
     const code: i64 = switch (r.term) {
         .exited => |c| c,
@@ -127,14 +127,14 @@ fn probeBwrap(a: Allocator, env: Env) Py {
                 return .{ .dict = d.items };
             }
             const err = pytext.pyStrip(if (r.stderr.len > 0) r.stderr else r.stdout);
-            var reason = std.fmt.allocPrint(a, "bwrap exited {d}", .{r.code}) catch "";
-            if (err.len > 0) reason = std.fmt.allocPrint(a, "{s}: {s}", .{ reason, err }) catch reason;
+            var reason = a.print("bwrap exited {d}", .{r.code}) catch "";
+            if (err.len > 0) reason = a.print("{s}: {s}", .{ reason, err }) catch reason;
             put(a, &d, "usable", .{ .bool = false });
             put(a, &d, "reason", Py.s(reason));
         },
         .failed => |why| {
             put(a, &d, "usable", .{ .bool = false });
-            put(a, &d, "reason", Py.s(std.fmt.allocPrint(a, "bwrap probe failed: {s}", .{why}) catch why));
+            put(a, &d, "reason", Py.s(a.print("bwrap probe failed: {s}", .{why}) catch why));
         },
     }
     return .{ .dict = d.items };
@@ -145,7 +145,7 @@ fn readInt(a: Allocator, path: []const u8) union(enum) { ok: i64, err: []const u
     defer sys.close(f.fd);
     const data = fsx.readAll(a, f.fd, 4096) catch |err| return .{ .err = osText(a, err, path) };
     const s = pytext.pyStrip(data);
-    const n = std.fmt.parseInt(i64, s, 10) catch return .{ .err = std.fmt.allocPrint(a, "invalid literal for int() with base 10: '{s}'", .{s}) catch "invalid literal" };
+    const n = std.fmt.parseInt(i64, s, 10) catch return .{ .err = a.print("invalid literal for int() with base 10: '{s}'", .{s}) catch "invalid literal" };
     return .{ .ok = n };
 }
 
@@ -153,9 +153,9 @@ fn osText(a: Allocator, err: anyerror, path: []const u8) []const u8 {
     const t: struct { n: u32, s: []const u8 } = switch (err) {
         error.NotFound => .{ .n = 2, .s = "No such file or directory" },
         error.AccessDenied => .{ .n = 13, .s = "Permission denied" },
-        else => return std.fmt.allocPrint(a, "{t}: '{s}'", .{ err, path }) catch path,
+        else => return a.print("{t}: '{s}'", .{ err, path }) catch path,
     };
-    return std.fmt.allocPrint(a, "[Errno {d}] {s}: '{s}'", .{ t.n, t.s, path }) catch path;
+    return a.print("[Errno {d}] {s}: '{s}'", .{ t.n, t.s, path }) catch path;
 }
 
 fn probeUserNamespaces(a: Allocator) Py {
@@ -169,7 +169,7 @@ fn probeUserNamespaces(a: Allocator) Py {
             put(a, &d, "max_user_namespaces", .{ .int = n });
             put(a, &d, "readable", .{ .bool = true });
         },
-        .err => |e| put(a, &d, "error", Py.s(std.fmt.allocPrint(a, "{s}: {s}", .{ path, e }) catch e)),
+        .err => |e| put(a, &d, "error", Py.s(a.print("{s}: {s}", .{ path, e }) catch e)),
     }
     switch (readInt(a, "/proc/sys/kernel/unprivileged_userns_clone")) {
         .ok => |n| put(a, &d, "unprivileged_userns_clone", .{ .int = n }),
@@ -203,11 +203,11 @@ fn probeUsernsSandbox(a: Allocator, env: Env) Py {
                 return .{ .dict = d.items };
             }
             const detail = pytext.pyStrip(if (r.stderr.len > 0) r.stderr else r.stdout);
-            var reason = std.fmt.allocPrint(a, "user-namespace probe exited {d}", .{r.code}) catch "";
-            if (detail.len > 0) reason = std.fmt.allocPrint(a, "{s}: {s}", .{ reason, detail }) catch reason;
+            var reason = a.print("user-namespace probe exited {d}", .{r.code}) catch "";
+            if (detail.len > 0) reason = a.print("{s}: {s}", .{ reason, detail }) catch reason;
             put(a, &d, "reason", Py.s(reason));
         },
-        .failed => |why| put(a, &d, "reason", Py.s(std.fmt.allocPrint(a, "user-namespace probe failed: {s}", .{why}) catch why)),
+        .failed => |why| put(a, &d, "reason", Py.s(a.print("user-namespace probe failed: {s}", .{why}) catch why)),
     }
     return .{ .dict = d.items };
 }
@@ -269,7 +269,7 @@ fn mkdtemp(a: Allocator, dir: []const u8, prefix: []const u8) ![]const u8 {
         var rnd: [8]u8 = undefined;
         _ = linux.getrandom(&rnd, rnd.len, 0);
         for (&rnd) |*b| b.* = alphabet[b.* % alphabet.len];
-        const p = try std.fmt.allocPrint(a, "{s}/{s}{s}", .{ dir, prefix, rnd });
+        const p = try a.print("{s}/{s}{s}", .{ dir, prefix, rnd });
         var zb: [sys.path_max:0]u8 = undefined;
         switch (linux.errno(linux.mkdirat(linux.AT.FDCWD, (try sys.z(&zb, p)).ptr, 0o700))) {
             .SUCCESS => return p,
@@ -379,7 +379,7 @@ const keys_from_source = [_]struct { v: [3]i64, present: bool }{
 fn parseFrameworkVersion(t: []const u8) ?[3]i64 {
     for ([_][]const u8{ "framework:", "This is EasyBuild" }) |lead| {
         var from: usize = 0;
-        while (std.mem.indexOfPos(u8, t, from, lead)) |at| : (from = at + 1) {
+        while (std.mem.findPos(u8, t, from, lead)) |at| : (from = at + 1) {
             var i = at + lead.len;
             const ws = i;
             while (i < t.len and pytext.pyWhitespace(t[i])) i += 1;
@@ -441,7 +441,7 @@ fn isFileFollow(p: []const u8) bool {
 
 fn probeEasybuild(a: Allocator, env: Env, eb: []const u8) Py {
     var d: D = .empty;
-    const path: ?[]const u8 = if (std.mem.indexOfScalar(u8, eb, '/') == null) which(a, env, eb) else (if (isFileFollow(eb)) eb else null);
+    const path: ?[]const u8 = if (std.mem.findScalar(u8, eb, '/') == null) which(a, env, eb) else (if (isFileFollow(eb)) eb else null);
     put(a, &d, "eb", Py.s(eb));
     put(a, &d, "path", if (path) |p| Py.s(p) else .null);
     put(a, &d, "found", .{ .bool = path != null });
@@ -453,7 +453,7 @@ fn probeEasybuild(a: Allocator, env: Env, eb: []const u8) Py {
     put(a, &d, "legacy_layout_versions", .{ .list = a.dupe(Py, &.{ Py.s("5.3.0"), Py.s("5.3.1") }) catch &.{} });
     put(a, &d, "reason", .null);
     const p = path orelse {
-        put(a, &d, "reason", Py.s(std.fmt.allocPrint(a, "{s} was not found on PATH", .{eb}) catch eb));
+        put(a, &d, "reason", Py.s(a.print("{s} was not found on PATH", .{eb}) catch eb));
         return .{ .dict = d.items };
     };
     const exe = if (p[0] == '/') p else blk: {
@@ -474,7 +474,7 @@ fn probeEasybuild(a: Allocator, env: Env, eb: []const u8) Py {
     const t = std.mem.join(a, "\n", parts.items) catch "";
     put(a, &d, "version_text", orNone(pytext.pyStrip(t)));
     if (r.code != 0) {
-        put(a, &d, "reason", Py.s(std.fmt.allocPrint(a, "eb --version exited {d}", .{r.code}) catch ""));
+        put(a, &d, "reason", Py.s(a.print("eb --version exited {d}", .{r.code}) catch ""));
         return .{ .dict = d.items };
     }
     const version = parseFrameworkVersion(t);
@@ -541,7 +541,7 @@ fn strOf(a: Allocator, v: ?Py) []const u8 {
     return switch (x) {
         .null => "None",
         .bool => |b| if (b) "True" else "False",
-        .int => |n| std.fmt.allocPrint(a, "{d}", .{n}) catch "",
+        .int => |n| a.print("{d}", .{n}) catch "",
         .str => |s| s,
         else => json.dumps(a, x, 0, false) catch "",
     };
@@ -581,7 +581,7 @@ pub fn printText(a: Allocator, r: Py) void {
         o.print(a, "EasyBuild: {s}\n", .{strOf(a, get(eb, "reason"))}) catch oom();
     }
     const mount = if (truthy(get(fs, "mount"))) strOf(a, get(fs, "mount")) else "";
-    const fl = std.fmt.allocPrint(a, "filesystem: {s} {s}", .{ strOf(a, get(fs, "fstype")), mount }) catch "";
+    const fl = a.print("filesystem: {s} {s}", .{ strOf(a, get(fs, "fstype")), mount }) catch "";
     o.appendSlice(a, std.mem.trimEnd(u8, fl, " \t\n\r\x0b\x0c")) catch oom();
     o.append(a, '\n') catch oom();
     o.appendSlice(a, "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)\n") catch oom();
@@ -660,7 +660,7 @@ pub fn sandboxMain(a: Allocator, env: Env, args: []const []const u8) u8 {
         return sandbox_setup_exit;
     }
     // os.execvpe(command[0], command, os.environ): a PATH search for a name.
-    const exe = if (std.mem.indexOfScalar(u8, command[0], '/') != null) command[0] else (which(a, env, command[0]) orelse {
+    const exe = if (std.mem.findScalar(u8, command[0], '/') != null) command[0] else (which(a, env, command[0]) orelse {
         cli.err(prefix ++ "[Errno 2] No such file or directory\n", .{});
         return sandbox_setup_exit;
     });
@@ -678,13 +678,13 @@ fn protect(a: Allocator, path_in: []const u8) ?[]const u8 {
     var rb: [sys.path_max]u8 = undefined;
     const cwd = fsx.realpath(fsx.cwd, ".", &rb) catch "/";
     const path = if (path_in.len > 0 and path_in[0] == '/') path_in else (std.fs.path.join(a, &.{ cwd, path_in }) catch path_in);
-    const st = fsx.statAt(fsx.cwd, path, false) catch return std.fmt.allocPrint(a, "read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
-    if (!st.isDir()) return std.fmt.allocPrint(a, "read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
+    const st = fsx.statAt(fsx.cwd, path, false) catch return a.print("read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
+    if (!st.isDir()) return a.print("read-only sandbox path is not a real directory: {s}", .{path}) catch "bad path";
     var zb: [sys.path_max:0]u8 = undefined;
     const z = sys.z(&zb, path) catch return "path too long";
     var e = mountRaw(z.ptr, z.ptr, MS_BIND | MS_REC);
     if (e == .SUCCESS) e = mountRaw(z.ptr, z.ptr, MS_BIND | MS_REMOUNT | MS_RDONLY);
-    if (e != .SUCCESS) return std.fmt.allocPrint(a, "mount {s}: {s}", .{ path, strerror(e) }) catch "mount failed";
+    if (e != .SUCCESS) return a.print("mount {s}: {s}", .{ path, strerror(e) }) catch "mount failed";
     return null;
 }
 
