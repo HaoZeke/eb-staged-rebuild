@@ -718,7 +718,11 @@ class ProjectionTests(RealLedger):
 
 class CommandLineTests(RealLedger):
     def run_main(self, *argv):
-        done = subprocess.run([sys.executable, "-m", "eb_staged_rebuild.ledger_maintenance", *argv],
+        # TOOL_BIN runs these against another build of the tool, through its
+        # ledger-maintenance subcommand.
+        tool = os.environ.get("TOOL_BIN")
+        command = [tool, "ledger-maintenance"] if tool else [sys.executable, "-m", "eb_staged_rebuild.ledger_maintenance"]
+        done = subprocess.run([*command, *argv],
                               check=False, capture_output=True, text=True, timeout=120,
                               cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         return done.returncode, done.stdout, done.stderr

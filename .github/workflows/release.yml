@@ -1,0 +1,83 @@
+name: release
+# On a tag vX.Y.Z: build the static binaries, test each on its own
+# architecture against the Python tool, check that the release binary
+# carries no test hook and that its version matches the tag, and open a
+# draft release with the binaries, SHA256SUMS and build provenance
+# attestations.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # argparse's usage wrapping changes between Python releases; the
+      # binary prints what Python 3.14 prints.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build test --summary all
+      - name: build
+        run: |
+          zig build -Drelease=true -Dtarget=${{ matrix.arch }}-linux-musl --prefix out
+          ! grep -aq EB_STAGED_REBUILD_ACL_MODEL out/bin/eb-staged-rebuild
+          ! grep -aq EB_STAGED_REBUILD_FAIL_AT out/bin/eb-staged-rebuild
+          ! zig build -Dtest-ops -Drelease=true
+          got=$(out/bin/eb-staged-rebuild --version)
+          py=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' eb_staged_rebuild/__init__.py)
+          if [ "${got}" != "eb-staged-rebuild ${GITHUB_REF_NAME#v}" ] || [ "${py}" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "versions: tag ${GITHUB_REF_NAME}, binary ${got}, Python ${py}"; exit 1
+          fi
+      - name: the release binary against the Python tool
+        run: |
+          zig build -Dtest-ops
+          TOOL_BIN="$PWD/out/bin/eb-staged-rebuild" bash tests/differential.sh
+          TOOL_BIN="$PWD/out/bin/eb-staged-rebuild" python tests/crash_matrix.py
+          TOOL_BIN="$PWD/out/bin/eb-staged-rebuild" python tests/signal_harness.py
+          TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python tests/fail_matrix.py
+          TOOL_BIN="$PWD/out/bin/eb-staged-rebuild" python tests/differential_metadata.py
+      - name: package
+        run: |
+          mkdir dist
+          cp out/bin/eb-staged-rebuild "dist/eb-staged-rebuild-${GITHUB_REF_NAME#v}-${{ matrix.arch }}-linux-musl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: dist
+      - run: cd dist && sha256sum eb-staged-rebuild-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      # A draft: release assets cannot change once a release is published,
+      # so every asset is attached before a person publishes it.
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --notes-file /dev/null --draft

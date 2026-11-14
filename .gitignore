@@ -7,3 +7,6 @@ dist/
 build/
 .pytest_cache/
 docs/_build/
+.zig-cache/
+zig-out/
+.differential-metadata/

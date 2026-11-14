@@ -1,0 +1,9 @@
+usage: eb-staged-rebuild run [-h] [--software SOFTWARE] [--modules MODULES]
+                             [--state-root STATE_ROOT] [--eb EB]
+                             [--backend {auto,bwrap,userns,installpath}]
+                             [--grace-hours GRACE_HOURS] [--dry-run]
+                             [--module NAME/VERSION] [--run-id RUN_ID]
+                             [--lock-timeout LOCK_TIMEOUT] [--skip-live-check]
+                             [--prepare PREPARE]
+                             [--ledger-config LEDGER_CONFIG]
+                             ...

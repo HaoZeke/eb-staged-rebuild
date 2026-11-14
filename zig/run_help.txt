@@ -1,0 +1,36 @@
+usage: eb-staged-rebuild run [-h] [--software SOFTWARE] [--modules MODULES]
+                             [--state-root STATE_ROOT] [--eb EB]
+                             [--backend {auto,bwrap,userns,installpath}]
+                             [--grace-hours GRACE_HOURS] [--dry-run]
+                             [--module NAME/VERSION] [--run-id RUN_ID]
+                             [--lock-timeout LOCK_TIMEOUT] [--skip-live-check]
+                             [--prepare PREPARE]
+                             [--ledger-config LEDGER_CONFIG]
+                             ...
+
+positional arguments:
+  eb_args               easyconfig and eb options, after --
+
+options:
+  -h, --help            show this help message and exit
+  --software SOFTWARE   live EASYBUILD_INSTALLPATH_SOFTWARE
+  --modules MODULES     live EASYBUILD_INSTALLPATH_MODULES
+  --state-root STATE_ROOT
+                        journal and stage root (default: <parent of
+                        software>/.eb-staged-rebuild)
+  --eb EB               EasyBuild executable
+  --backend {auto,bwrap,userns,installpath}
+                        build isolation: auto tries bwrap, then a read-only
+                        user namespace, then the unsandboxed install-path
+                        fallback
+  --grace-hours GRACE_HOURS
+  --dry-run
+  --module NAME/VERSION
+  --run-id RUN_ID
+  --lock-timeout LOCK_TIMEOUT
+  --skip-live-check
+  --prepare PREPARE     executable called with a directory-swap context JSON
+                        before the live directory is exchanged
+  --ledger-config LEDGER_CONFIG
+                        JSON eb-stack ledger configuration; started records
+                        precede the directory swap

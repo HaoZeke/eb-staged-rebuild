@@ -1,0 +1,19 @@
+.{
+    .name = .eb_staged_rebuild,
+    .version = "0.4.4",
+    .fingerprint = 0xee0442ffc6cda659,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .zig_common = .{
+            .url = "git+https://github.com/stackhands/zig-common#v0.7.0",
+            .hash = "zig_common-0.7.0-kBaPeT3wAgCABYHROFijxlR7HDjiDGXeeukict5ym-WS",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zig",
+        "LICENSE",
+        "README.md",
+    },
+}

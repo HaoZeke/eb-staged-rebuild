@@ -16,6 +16,8 @@ jobs:
         uses: ./.github/actions/pinned-ledger
       - name: unit tests
         run: python -m unittest discover -s tests -v
+      - name: every test that imports the Python code has a TESTMAP.md row
+        run: python tests/check_testmap.py
 
   integration:
     runs-on: ubuntu-latest
@@ -37,6 +39,17 @@ jobs:
         run: |
           export PATH="/usr/share/lmod/lmod/libexec:${PATH}"
           python -m unittest tests.test_easybuild_integration -v
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build -Drelease=true
+      - name: rebuild stagedemo with the binary
+        env:
+          EB_STAGED_REBUILD_INTEGRATION: "1"
+          LMOD_CMD: /usr/share/lmod/lmod/libexec/lmod
+        run: |
+          export PATH="/usr/share/lmod/lmod/libexec:${PATH}"
+          TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest tests.test_easybuild_integration_cli -v
 
   docs:
     runs-on: ubuntu-latest
@@ -51,3 +64,57 @@ jobs:
         run: python -m pip install -e ".[docs]"
       - name: build
         run: sphinx-build -W -b html docs docs/_build/html
+
+  zig:
+    # The Zig build: its unit tests, and the read-only commands compared
+    # with the Python tool.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # argparse's usage wrapping and choice quoting change between Python
+      # releases; the binary prints what Python 3.14 prints.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      # setup-zig checks the tarball's minisign signature against the Zig
+      # project's key.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig fmt --check build.zig build.zig.zon zig
+      - run: zig build test --summary all
+      - run: zig build -Drelease=true
+      - name: the release binary carries no test hooks
+        run: |
+          ! grep -aq EB_STAGED_REBUILD_ACL_MODEL zig-out/bin/eb-staged-rebuild
+          ! grep -aq EB_STAGED_REBUILD_FAIL_AT zig-out/bin/eb-staged-rebuild
+          ! zig build -Dtest-ops -Drelease=true
+      - name: the -Dtest-ops test artifact
+        run: zig build -Dtest-ops
+      - run: shellcheck -S warning tests/differential.sh
+      - name: commands against the Python tool
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" bash tests/differential.sh
+      - name: a run and a rollback killed at every step, then resumed
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/crash_matrix.py
+      - name: a run signalled while its build command runs
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/signal_harness.py
+      - name: ledger CLI
+        uses: ./.github/actions/pinned-ledger
+      - name: ledger-maintenance against the Python tool
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/differential_ledger.py
+      - name: publication access metadata against the Python tool
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/differential_metadata.py
+      - name: ACL publication tests against the test artifact
+        run: TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python -m unittest -v tests.test_acl_publication_cli
+      - name: a run and a rollback failed at every step, against the test artifact
+        run: TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python tests/fail_matrix.py
+      - name: ledger-maintenance command-line test against the binary
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_maintenance.CommandLineTests
+      - name: ledger append, recovery and idempotence against eb-stack, both implementations
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_eb_stack_cli
+      - name: build events and the bounded ledger call against the binary
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_build_events tests.test_build_events_cli tests.test_ledger_bounded_cli
