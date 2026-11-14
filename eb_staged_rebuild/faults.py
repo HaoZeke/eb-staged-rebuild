@@ -29,8 +29,9 @@ class FaultInjector:
             raise OSError(errno.EIO, f"injected failure at {step}")
         # A real SIGKILL cannot be injected in-process. Tests set this to
         # pause after the previous step has happened and before this one.
+        # A trailing "*" names every step that starts with what precedes it.
         token = os.environ.get("EB_STAGED_REBUILD_PAUSE_AT")
-        if token and token == step:
+        if token and (token == step or (token.endswith("*") and step.startswith(token[:-1]))):
             ready = os.environ.get("EB_STAGED_REBUILD_PAUSE_READY")
             if ready:
                 fd = os.open(ready, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)

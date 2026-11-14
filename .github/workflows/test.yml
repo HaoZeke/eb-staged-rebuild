@@ -112,3 +112,5 @@ jobs:
         run: TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python tests/fail_matrix.py
       - name: ledger-maintenance command-line test against the binary
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_maintenance.CommandLineTests
+      - name: ledger append, recovery and idempotence against eb-stack, both implementations
+        run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_eb_stack_cli

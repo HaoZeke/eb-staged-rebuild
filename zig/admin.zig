@@ -103,7 +103,9 @@ const PauseCtx = struct { env: probe.Env };
 fn reachStep(ctx: ?*anyopaque, step: []const u8) void {
     const c: *const PauseCtx = @ptrCast(@alignCast(ctx.?));
     const token = c.env.get("EB_STAGED_REBUILD_PAUSE_AT") orelse return;
-    if (!std.mem.eql(u8, token, step)) return;
+    // A trailing "*" names every step that starts with what precedes it.
+    const prefix = token.len > 0 and token[token.len - 1] == '*';
+    if (!(std.mem.eql(u8, token, step) or (prefix and std.mem.startsWith(u8, step, token[0 .. token.len - 1])))) return;
     if (c.env.get("EB_STAGED_REBUILD_PAUSE_READY")) |ready| if (ready.len > 0) {
         if (sys.openat(fsx.cwd, ready, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644)) |fd| sys.close(fd) else |_| {}
     };
