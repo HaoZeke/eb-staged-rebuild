@@ -382,3 +382,29 @@ in `tests/test_ledger_bounded_cli.py`, against `TOOL_BIN` or the Python module.
 | test_ledger_bounded.BoundedOutputTests.test_a_noisy_helper_cannot_outlive_a_killed_caller | zig-common `src/proc_test.zig` test "a noisy helper cannot outlive a killed caller" |
 | test_ledger_bounded.ExactReceiptTests.test_receipt_that_fills_the_output_limit_is_accepted | `tests/test_ledger_bounded_cli.py` test_receipt_that_fills_the_output_limit_is_accepted (the replay comes from a retry after `fail-after-append`) |
 | test_ledger_bounded.ExactReceiptTests.test_receipt_beyond_the_output_limit_is_not_read | `tests/test_ledger_bounded_cli.py` test_receipt_beyond_the_output_limit_is_not_read |
+## tests/test_ledger_directory_swap.py (`run`, `resume` and `rollback` with a ledger)
+
+The differential's ledger cases run with a fake eb-stack (`tests/fake_eb_stack.py`) and compare the ledger
+it writes, with ids, times and the state root's scope normalized.
+
+| test | replacement |
+|---|---|
+| DirectorySwapLedgerTests.test_records_name_the_stable_directory_and_use_schema_4 | differential "run, ledger", "status, ledger run", "ledger records so far" (journal `schema` 4 and `publication`; records name `demo/1` at the stable directory with action `rebuild-inplace`) |
+| DirectorySwapLedgerTests.test_required_ledger_failure_does_not_swap | differential "run, ledger append fails", "resume delivers the record" |
+| DirectorySwapLedgerTests.test_policy_change_is_refused_and_the_stable_tree_stays | differential "resume after the ledger actor changed" |
+| DirectorySwapLedgerTests.test_rollback_correction_is_idempotent | differential "rollback a ledger run", "rollback a ledger run again", "ledger records so far" (one correction pair naming the finished record) |
+| DirectorySwapLedgerTests.test_generation_pointer_schema_is_not_applied | differential "resume a generation-pointer record", "status of a generation-pointer record" |
+
+## tests/test_ledger_policy.py
+
+| test | replacement |
+|---|---|
+| LedgerPolicyTests.test_required_policy_cannot_change_while_a_record_is_pending | differential "run, ledger append fails again", "resume after the ledger became optional" |
+| LedgerPolicyTests.test_completed_run_cannot_redirect_its_events_to_another_ledger | differential "resume a completed run with its ledger redirected", "ledger records after the policy cases" |
+| LedgerPolicyTests.test_policy_is_frozen_before_the_build_starts | differential "run, the build changes the ledger policy", "ledger records after the policy cases" |
+
+## tests/test_ledger_eb_stack.py
+
+| test | replacement |
+|---|---|
+| RealEbStackLedgerTests.test_append_recovery_and_idempotence | `tests/test_ledger_eb_stack_cli.py` CliEbStackLedgerTests.test_append_recovery_and_idempotence (a real eb-stack; the run is killed with SIGKILL at `ledger.acked:*`, resumed twice, rolled back twice; Python and the binary) |
