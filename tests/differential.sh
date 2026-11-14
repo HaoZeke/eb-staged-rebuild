@@ -164,6 +164,10 @@ fixture() {
     mkdir -p "${root}/bin"
     printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "bubblewrap 0.11.0"; exit 0; fi\nif [ -n "${FAKE_BWRAP_FAIL:-}" ]; then echo "setting up uid map: Permission denied (user namespaces disabled)" >&2; exit 1; fi\nexit 0\n' > "${root}/bin/bwrap"
     chmod +x "${root}/bin/bwrap"
+    # unshare: the real one, or a refusal when FAKE_UNSHARE_FAIL is set, so
+    # auto can find no sandbox at all.
+    printf '#!/bin/sh\nif [ -n "${FAKE_UNSHARE_FAIL:-}" ]; then echo "unshare: unshare failed: Operation not permitted" >&2; exit 1; fi\nexec %s "$@"\n' "$(command -v unshare)" > "${root}/bin/unshare"
+    chmod +x "${root}/bin/unshare"
     # Two modules for the publication barrier, and policies that see their
     # context: two remove the second generation's PAYLOAD and then disable
     # or make unreadable its easybuild directory, the remaining evidence;
@@ -301,6 +305,7 @@ compare_admin "run, bwrap, overlay" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_EB_OVERLAY=
 compare_admin "run, bwrap probe fails" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_BWRAP_FAIL=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend bwrap --eb @ROOT@/eb --run-id b5 --skip-live-check --module demo/1 -- demo-1.eb
 compare_admin "run, auto prefers bwrap" ${bw} FAKE_EB_VERSION=5.4.2 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend auto --eb @ROOT@/eb --run-id b6 --skip-live-check --module demo/1 -- demo-1.eb
 compare_admin "run --dry-run, auto when bwrap fails" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_BWRAP_FAIL=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend auto --eb @ROOT@/eb --dry-run --module demo/1 -- demo-1.eb
+compare_admin "run, auto with no sandbox uses installpath" ${bw} FAKE_EB_VERSION=5.4.2 FAKE_BWRAP_FAIL=1 FAKE_UNSHARE_FAIL=1 @CMD@ run --software @ROOT@/software --modules @ROOT@/modules --state-root @ROOT@/state --backend auto --eb @ROOT@/eb --run-id b8 --skip-live-check --module demo/1 -- demo-1.eb
 for v in 5.3.0 5.3.1 5.4.0 5.4.1 5.4.2 5.5.0; do
     compare_admin "probe, EasyBuild ${v} stage keys" ${bw} FAKE_EB_VERSION=${v} @CMD@ probe --path @ROOT@/state --json --eb @ROOT@/eb
 done

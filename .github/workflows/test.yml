@@ -37,6 +37,17 @@ jobs:
         run: |
           export PATH="/usr/share/lmod/lmod/libexec:${PATH}"
           python -m unittest tests.test_easybuild_integration -v
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build -Drelease=true
+      - name: rebuild stagedemo with the binary
+        env:
+          EB_STAGED_REBUILD_INTEGRATION: "1"
+          LMOD_CMD: /usr/share/lmod/lmod/libexec/lmod
+        run: |
+          export PATH="/usr/share/lmod/lmod/libexec:${PATH}"
+          TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest tests.test_easybuild_integration_cli -v
 
   docs:
     runs-on: ubuntu-latest
