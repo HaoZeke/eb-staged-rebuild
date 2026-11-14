@@ -2,6 +2,7 @@
 //! directory. This build carries the checks and the dry run; the build, the
 //! swap and resume follow.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const main_mod = @import("main.zig");
@@ -72,7 +73,7 @@ pub fn filterEbArgs(a: Allocator, args: []const []const u8) []const []const u8 {
             i += if (eq == null) 2 else 1;
             continue;
         }
-        kept.append(a, arg) catch {};
+        kept.append(a, arg) catch oom();
         i += 1;
     }
     return kept.items;
@@ -109,23 +110,23 @@ fn buildCommand(a: Allocator, env: probe.Env, spec: Spec, probes: Py, generation
     const filtered = ensureRebuild(a, filterEbArgs(a, spec.eb_args));
     var cmd: std.ArrayList([]const u8) = .empty;
     if (std.mem.eql(u8, spec.backend, "bwrap")) {
-        cmd.appendSlice(a, &.{ spec.eb_executable, "--experimental", "--bwrap", std.fmt.allocPrint(a, "--bwrap-installpath={s}", .{generation_root}) catch "", "--bwrap-options=--die-with-parent" }) catch {};
-        cmd.appendSlice(a, filtered) catch {};
+        cmd.appendSlice(a, &.{ spec.eb_executable, "--experimental", "--bwrap", std.fmt.allocPrint(a, "--bwrap-installpath={s}", .{generation_root}) catch "", "--bwrap-options=--die-with-parent" }) catch oom();
+        cmd.appendSlice(a, filtered) catch oom();
         return join(a, cmd.items);
     }
     const software = std.fs.path.join(a, &.{ generation_root, "software" }) catch "";
     const modules = std.fs.path.join(a, &.{ generation_root, "modules" }) catch "";
     var inner: std.ArrayList([]const u8) = .empty;
-    inner.appendSlice(a, &.{ spec.eb_executable, std.fmt.allocPrint(a, "--installpath-software={s}", .{software}) catch "", std.fmt.allocPrint(a, "--installpath-modules={s}", .{modules}) catch "" }) catch {};
-    inner.appendSlice(a, filtered) catch {};
+    inner.appendSlice(a, &.{ spec.eb_executable, std.fmt.allocPrint(a, "--installpath-software={s}", .{software}) catch "", std.fmt.allocPrint(a, "--installpath-modules={s}", .{modules}) catch "" }) catch oom();
+    inner.appendSlice(a, filtered) catch oom();
     if (!std.mem.eql(u8, spec.backend, "userns")) return join(a, inner.items);
     const report = pyfmt.get(probes, "userns_sandbox");
     const unshare = blk: {
         if (report) |r| if (pyfmt.get(r, "path")) |p| if (p == .str and p.str.len > 0) break :blk p.str;
         break :blk which(a, env, "unshare") orelse "unshare";
     };
-    cmd.appendSlice(a, &.{ unshare, "--user", "--map-root-user", "--mount", "--fork", "--kill-child", selfExe(a), probe.sandbox_command, "--read-only", spec.software, "--read-only", spec.modules, "--" }) catch {};
-    cmd.appendSlice(a, inner.items) catch {};
+    cmd.appendSlice(a, &.{ unshare, "--user", "--map-root-user", "--mount", "--fork", "--kill-child", selfExe(a), probe.sandbox_command, "--read-only", spec.software, "--read-only", spec.modules, "--" }) catch oom();
+    cmd.appendSlice(a, inner.items) catch oom();
     return join(a, cmd.items);
 }
 
@@ -199,38 +200,38 @@ fn dryRun(a: Allocator, env: probe.Env, spec: Spec, probes: Py) u8 {
     const exchange = pyfmt.get(probes, "rename_exchange") orelse Py{ .dict = &.{} };
     const ns = pyfmt.get(probes, "user_namespaces") orelse Py{ .dict = &.{} };
     var maxns: std.ArrayList(u8) = .empty;
-    pyfmt.str(&maxns, a, pyfmt.get(ns, "max_user_namespaces")) catch {};
+    pyfmt.str(&maxns, a, pyfmt.get(ns, "max_user_namespaces")) catch oom();
     var lines: std.ArrayList([]const u8) = .empty;
     const fmt = struct {
         fn f(al: Allocator, comptime s: []const u8, args: anytype) []const u8 {
             return std.fmt.allocPrint(al, s, args) catch "";
         }
     }.f;
-    lines.append(a, fmt(a, "backend: {s}", .{spec.backend})) catch {};
-    lines.append(a, fmt(a, "software: {s}", .{admin.abspath(a, spec.software)})) catch {};
-    lines.append(a, fmt(a, "modules: {s}", .{admin.abspath(a, spec.modules)})) catch {};
-    lines.append(a, fmt(a, "state root: {s}", .{admin.abspath(a, spec.state_root)})) catch {};
+    lines.append(a, fmt(a, "backend: {s}", .{spec.backend})) catch oom();
+    lines.append(a, fmt(a, "software: {s}", .{admin.abspath(a, spec.software)})) catch oom();
+    lines.append(a, fmt(a, "modules: {s}", .{admin.abspath(a, spec.modules)})) catch oom();
+    lines.append(a, fmt(a, "state root: {s}", .{admin.abspath(a, spec.state_root)})) catch oom();
     lines.append(a, fmt(a, "bwrap usable: {s} ({s})", .{
         if (usable(probes, "bwrap")) "True" else "False",
         strOr(pyfmt.get(bwrap, "reason"), strOr(pyfmt.get(bwrap, "version"), "present")),
-    })) catch {};
-    lines.append(a, fmt(a, "user.max_user_namespaces: {s}", .{maxns.items})) catch {};
+    })) catch oom();
+    lines.append(a, fmt(a, "user.max_user_namespaces: {s}", .{maxns.items})) catch oom();
     lines.append(a, fmt(a, "renameat2 RENAME_EXCHANGE on {s}: {s}", .{
         strOr(pyfmt.get(exchange, "fstype"), "this filesystem"),
         if (pyfmt.truthy(pyfmt.get(exchange, "ok"))) "yes" else "no",
-    })) catch {};
-    lines.append(a, fmt(a, "easybuild: {s}", .{strOr(pyfmt.get(easybuild, "version_text"), strOr(pyfmt.get(easybuild, "reason"), "not found"))})) catch {};
-    lines.append(a, "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)") catch {};
-    lines.append(a, "publish: renameat2(RENAME_EXCHANGE), with a restoring ordinary-rename fallback") catch {};
+    })) catch oom();
+    lines.append(a, fmt(a, "easybuild: {s}", .{strOr(pyfmt.get(easybuild, "version_text"), strOr(pyfmt.get(easybuild, "reason"), "not found"))})) catch oom();
+    lines.append(a, "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)") catch oom();
+    lines.append(a, "publish: renameat2(RENAME_EXCHANGE), with a restoring ordinary-rename fallback") catch oom();
     var problems: std.ArrayList([]const u8) = .empty;
     if (std.mem.eql(u8, spec.backend, "bwrap") and !usable(probes, "bwrap"))
-        problems.append(a, strOr(pyfmt.get(bwrap, "reason"), "bwrap is not usable")) catch {};
+        problems.append(a, strOr(pyfmt.get(bwrap, "reason"), "bwrap is not usable")) catch oom();
     for (spec.module_rels) |rel| {
         const path = std.fs.path.join(a, &.{ spec.software, rel }) catch continue;
-        if (std.mem.eql(u8, main_mod.lstatKind(path), "symlink")) problems.append(a, fmt(a, "{s} is a symlink", .{path})) catch {};
+        if (std.mem.eql(u8, main_mod.lstatKind(path), "symlink")) problems.append(a, fmt(a, "{s} is a symlink", .{path})) catch oom();
     }
     const gen = std.fs.path.join(a, &.{ spec.state_root, "generations", "<run-id>" }) catch "";
-    lines.append(a, fmt(a, "command: {s}", .{buildCommand(a, env, spec, probes, gen)})) catch {};
+    lines.append(a, fmt(a, "command: {s}", .{buildCommand(a, env, spec, probes, gen)})) catch oom();
     if (problems.items.len > 0) {
         log("dry-run would refuse: {s}", .{std.mem.join(a, "; ", problems.items) catch ""});
         for (lines.items) |l| log("{s}", .{l});

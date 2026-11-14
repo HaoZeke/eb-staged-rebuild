@@ -5,6 +5,7 @@
 //! \s is Python's Unicode whitespace and includes newlines, so an assignment
 //! may span lines; $ is the end of the text or the position before a newline.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const common = @import("zig_common");
 const pytext = common.pytext;
 
@@ -182,7 +183,7 @@ pub fn moduleIdentity(a: Allocator, modules_root: []const u8, module_path: []con
     const rel = relpath(a, module_path, modules_root);
     var parts: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, rel, '/');
-    while (it.next()) |x| parts.append(a, x) catch {};
+    while (it.next()) |x| parts.append(a, x) catch oom();
     const last = parts.items[parts.items.len - 1];
     const stem = splitextStem(last);
     if (parts.items.len < 2) return stem;
@@ -203,14 +204,14 @@ pub fn relpath(a: Allocator, path: []const u8, start: []const u8) []const u8 {
     var pp: std.ArrayList([]const u8) = .empty;
     var sp: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |x| if (x.len > 0) pp.append(a, x) catch {};
+    while (it.next()) |x| if (x.len > 0) pp.append(a, x) catch oom();
     it = std.mem.splitScalar(u8, start, '/');
-    while (it.next()) |x| if (x.len > 0) sp.append(a, x) catch {};
+    while (it.next()) |x| if (x.len > 0) sp.append(a, x) catch oom();
     var common_len: usize = 0;
     while (common_len < pp.items.len and common_len < sp.items.len and std.mem.eql(u8, pp.items[common_len], sp.items[common_len])) common_len += 1;
     var out: std.ArrayList([]const u8) = .empty;
-    for (sp.items[common_len..]) |_| out.append(a, "..") catch {};
-    out.appendSlice(a, pp.items[common_len..]) catch {};
+    for (sp.items[common_len..]) |_| out.append(a, "..") catch oom();
+    out.appendSlice(a, pp.items[common_len..]) catch oom();
     if (out.items.len == 0) return ".";
     return std.mem.join(a, "/", out.items) catch ".";
 }

@@ -1,6 +1,7 @@
 //! retire, rollback of a retire journal, and gc: the commands that change a
 //! module tree or a state root without building anything.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const main_mod = @import("main.zig");
@@ -53,7 +54,7 @@ pub fn abspath(a: Allocator, p: []const u8) []const u8 {
             _ = parts.pop();
             continue;
         }
-        parts.append(a, seg) catch {};
+        parts.append(a, seg) catch oom();
     }
     const joined = std.mem.join(a, "/", parts.items) catch return full;
     return std.fmt.allocPrint(a, "/{s}", .{joined}) catch full;
@@ -78,11 +79,11 @@ fn dictSet(a: Allocator, d: Py, key: []const u8, value: Py) Py {
     var found = false;
     for (d.dict) |e| {
         if (std.mem.eql(u8, e.key, key)) {
-            out.append(a, .{ .key = e.key, .value = value }) catch {};
+            out.append(a, .{ .key = e.key, .value = value }) catch oom();
             found = true;
-        } else out.append(a, e) catch {};
+        } else out.append(a, e) catch oom();
     }
-    if (!found) out.append(a, .{ .key = key, .value = value }) catch {};
+    if (!found) out.append(a, .{ .key = key, .value = value }) catch oom();
     return .{ .dict = out.items };
 }
 
@@ -209,7 +210,7 @@ fn plan(c: *Ctx, state_root: []const u8, module_in: []const u8) Plan {
         const st = pyfmt.get(j, "state");
         if (eqlStr(pyfmt.get(j, "module_path"), module) and (eqlStr(st, "retiring") or eqlStr(st, "retired"))) {
             var rid: std.ArrayList(u8) = .empty;
-            pyfmt.str(&rid, c.a, pyfmt.get(j, "run_id")) catch {};
+            pyfmt.str(&rid, c.a, pyfmt.get(j, "run_id")) catch oom();
             refuse("{s} is already retired ({s})", .{ module, rid.items });
         }
     }
@@ -232,7 +233,7 @@ fn discardEmpty(a: Allocator, top: []const u8) void {
     {
         defer sys.close(fd);
         var it = fsx.DirIter.init(a, fd) catch return;
-        while (it.next() catch null) |e| if ((fsx.entryType(fd, e) catch 0) == fsx.DT.DIR) names.append(a, a.dupe(u8, e.name) catch continue) catch {};
+        while (it.next() catch null) |e| if ((fsx.entryType(fd, e) catch 0) == fsx.DT.DIR) names.append(a, a.dupe(u8, e.name) catch continue) catch oom();
     }
     for (names.items) |n| discardEmpty(a, std.fs.path.join(a, &.{ top, n }) catch continue);
     rmdir(top);
@@ -407,8 +408,8 @@ fn liveRoots(c: *Ctx, journals: []const Py) []const []const u8 {
         if (eqlStr(pyfmt.get(j, "kind"), "retire")) {
             if (!eqlStr(pyfmt.get(j, "state"), "retired")) {
                 if (moduleRoot(c, str(pyfmt.get(j, "module_path")) orelse "")) |r| {
-                    roots.append(c.a, r) catch {};
-                    roots.append(c.a, resolved(c, r)) catch {};
+                    roots.append(c.a, r) catch oom();
+                    roots.append(c.a, resolved(c, r)) catch oom();
                 }
             }
             continue;
@@ -419,8 +420,8 @@ fn liveRoots(c: *Ctx, journals: []const Py) []const []const u8 {
             const live = str(pyfmt.get(m, "live_module")) orelse continue;
             if (live.len == 0) continue;
             if (moduleRoot(c, live)) |r| {
-                roots.append(c.a, r) catch {};
-                roots.append(c.a, resolved(c, r)) catch {};
+                roots.append(c.a, r) catch oom();
+                roots.append(c.a, resolved(c, r)) catch oom();
             }
         }
     }
@@ -498,7 +499,7 @@ fn openOwned(c: *Ctx, parent: sys.fd_t, name: []const u8, dev: u64) sys.fd_t {
 fn emptyDir(c: *Ctx, fd: sys.fd_t, dev: u64) void {
     var names: std.ArrayList([]const u8) = .empty;
     var it = fsx.DirIter.init(c.a, fd) catch return;
-    while (it.next() catch |err| refuse("{t}", .{err})) |e| names.append(c.a, c.a.dupe(u8, e.name) catch continue) catch {};
+    while (it.next() catch |err| refuse("{t}", .{err})) |e| names.append(c.a, c.a.dupe(u8, e.name) catch continue) catch oom();
     for (names.items) |n| {
         const info = fsx.statAt(fd, n, false) catch |err| refuse("{s}", .{main_mod.osError(c.a, err, n)});
         if (info.isDir()) {
@@ -545,22 +546,22 @@ pub fn gc(c: *Ctx, state_root_in: []const u8, grace_hours: f64, dry_run: bool, i
                 why = "failed candidate";
             } else {
                 var b: std.ArrayList(u8) = .empty;
-                pyfmt.str(&b, a, pyfmt.get(j, "state")) catch {};
+                pyfmt.str(&b, a, pyfmt.get(j, "state")) catch oom();
                 why = std.fmt.allocPrint(a, "state {s} is kept", .{b.items}) catch "";
             }
             const w = when orelse {
-                actions.append(a, .{ .path = retired, .action = "keep", .reason = why }) catch {};
+                actions.append(a, .{ .path = retired, .action = "keep", .reason = why }) catch oom();
                 continue;
             };
             if (referenced(c, retired, roots)) {
-                actions.append(a, .{ .path = retired, .action = "keep", .reason = "a live module resolves inside it" }) catch {};
+                actions.append(a, .{ .path = retired, .action = "keep", .reason = "a live module resolves inside it" }) catch oom();
                 continue;
             }
             if (now - w < grace) {
-                actions.append(a, .{ .path = retired, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace ({s})", .{why}) catch why }) catch {};
+                actions.append(a, .{ .path = retired, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace ({s})", .{why}) catch why }) catch oom();
                 continue;
             }
-            actions.append(a, .{ .path = retired, .action = "remove", .reason = why }) catch {};
+            actions.append(a, .{ .path = retired, .action = "remove", .reason = why }) catch oom();
             if (dry_run) continue;
             removeTree(c, retired, dirname(retired));
             mods[mi] = dictSet(a, m, "retired_removed_at", .{ .float = now });
@@ -599,11 +600,11 @@ pub fn gc(c: *Ctx, state_root_in: []const u8, grace_hours: f64, dry_run: bool, i
         if (!st.isDir()) continue;
         const ready = latest.get(dir).? + grace;
         if (referenced(c, dir, roots)) {
-            actions.append(a, .{ .path = dir, .action = "keep", .reason = "a live module resolves inside it" }) catch {};
+            actions.append(a, .{ .path = dir, .action = "keep", .reason = "a live module resolves inside it" }) catch oom();
         } else if (now < ready) {
-            actions.append(a, .{ .path = dir, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace (retired module); ready to remove by hand after {s}", .{gmtimeStamp(a, ready, true)}) catch "" }) catch {};
+            actions.append(a, .{ .path = dir, .action = "keep", .reason = std.fmt.allocPrint(a, "within grace (retired module); ready to remove by hand after {s}", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
         } else {
-            actions.append(a, .{ .path = dir, .action = "manual", .reason = std.fmt.allocPrint(a, "ready to remove by hand after {s}; gc does not delete the stable software directory", .{gmtimeStamp(a, ready, true)}) catch "" }) catch {};
+            actions.append(a, .{ .path = dir, .action = "manual", .reason = std.fmt.allocPrint(a, "ready to remove by hand after {s}; gc does not delete the stable software directory", .{gmtimeStamp(a, ready, true)}) catch "" }) catch oom();
         }
     }
     for (actions.items) |act| cli.out("{s}: {s} ({s})\n", .{ act.action, act.path, act.reason });

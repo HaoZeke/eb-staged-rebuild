@@ -5,6 +5,7 @@
 //! record without a receipt stays pending with the same bytes and event id,
 //! so a retry is acknowledged once.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 const main_mod = @import("main.zig");
@@ -34,11 +35,11 @@ fn dictSet(a: Allocator, d: Py, key: []const u8, value: Py) Py {
     var found = false;
     if (d == .dict) for (d.dict) |e| {
         if (std.mem.eql(u8, e.key, key)) {
-            out.append(a, .{ .key = e.key, .value = value }) catch {};
+            out.append(a, .{ .key = e.key, .value = value }) catch oom();
             found = true;
-        } else out.append(a, e) catch {};
+        } else out.append(a, e) catch oom();
     };
-    if (!found) out.append(a, .{ .key = key, .value = value }) catch {};
+    if (!found) out.append(a, .{ .key = key, .value = value }) catch oom();
     return .{ .dict = out.items };
 }
 
@@ -177,7 +178,7 @@ fn timeoutSeconds(config: Py) f64 {
 
 fn timeoutText(a: Allocator, config: Py) []const u8 {
     var b: std.ArrayList(u8) = .empty;
-    pyfmt.str(&b, a, pyfmt.get(config, "timeout") orelse Py{ .int = 120 }) catch {};
+    pyfmt.str(&b, a, pyfmt.get(config, "timeout") orelse Py{ .int = 120 }) catch oom();
     return b.items;
 }
 
@@ -294,7 +295,7 @@ fn save(a: Allocator, run_dir: []const u8, data: Py, faults: atomic.Faults, step
 pub fn pendingEvents(a: Allocator, data: Py) []const Py {
     var out: std.ArrayList(Py) = .empty;
     const events = pyfmt.get(data, "events") orelse return &.{};
-    for (events.list) |e| if (!std.mem.eql(u8, s(pyfmt.get(e, "status")), "acknowledged")) out.append(a, e) catch {};
+    for (events.list) |e| if (!std.mem.eql(u8, s(pyfmt.get(e, "status")), "acknowledged")) out.append(a, e) catch oom();
     return out.items;
 }
 
@@ -532,7 +533,7 @@ fn append(a: Allocator, envp: common.proc.Envp, config: Py, record_path: []const
 
 pub fn pendingMessage(a: Allocator, left: []const Py) []const u8 {
     var e: std.ArrayList(u8) = .empty;
-    pyfmt.str(&e, a, pyfmt.get(left[0], "error")) catch {};
+    pyfmt.str(&e, a, pyfmt.get(left[0], "error")) catch oom();
     return std.fmt.allocPrint(a, "{d} ledger event(s) not acknowledged ({s}); run resume", .{ left.len, e.items }) catch "";
 }
 

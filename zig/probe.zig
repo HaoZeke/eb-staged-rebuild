@@ -1,6 +1,7 @@
 //! Capability probes. Results describe this machine and this directory,
 //! nothing else.
 const std = @import("std");
+const oom = @import("oom.zig").oom;
 const linux = std.os.linux;
 const common = @import("zig_common");
 
@@ -42,7 +43,7 @@ fn put(a: Allocator, d: *D, k: []const u8, v: Py) void {
         e.value = v;
         return;
     };
-    d.append(a, .{ .key = k, .value = v }) catch {};
+    d.append(a, .{ .key = k, .value = v }) catch oom();
 }
 
 /// shutil.which: PATH, or os.defpath when PATH is unset.
@@ -83,14 +84,14 @@ fn run(a: Allocator, env: Env, argv: []const []const u8, timeout_ms: u32) Ran {
 
 fn listRepr(a: Allocator, argv: []const []const u8) []const u8 {
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch {};
+    out.append(a, '[') catch oom();
     for (argv, 0..) |s, i| {
-        if (i > 0) out.appendSlice(a, ", ") catch {};
-        out.append(a, '\'') catch {};
-        out.appendSlice(a, s) catch {};
-        out.append(a, '\'') catch {};
+        if (i > 0) out.appendSlice(a, ", ") catch oom();
+        out.append(a, '\'') catch oom();
+        out.appendSlice(a, s) catch oom();
+        out.append(a, '\'') catch oom();
     }
-    out.append(a, ']') catch {};
+    out.append(a, ']') catch oom();
     return out.items;
 }
 
@@ -476,8 +477,8 @@ fn probeEasybuild(a: Allocator, env: Env, eb: []const u8) Py {
         },
     };
     var parts: std.ArrayList([]const u8) = .empty;
-    if (r.stdout.len > 0) parts.append(a, r.stdout) catch {};
-    if (r.stderr.len > 0) parts.append(a, r.stderr) catch {};
+    if (r.stdout.len > 0) parts.append(a, r.stdout) catch oom();
+    if (r.stderr.len > 0) parts.append(a, r.stderr) catch oom();
     const t = std.mem.join(a, "\n", parts.items) catch "";
     put(a, &d, "version_text", orNone(pytext.pyStrip(t)));
     if (r.code != 0) {
@@ -563,35 +564,35 @@ pub fn printText(a: Allocator, r: Py) void {
     const eb = get(r, "easybuild").?;
     const fs = get(r, "filesystem") orelse Py{ .dict = &.{} };
     var o: std.ArrayList(u8) = .empty;
-    o.print(a, "bwrap: {s}\n", .{if (truthy(get(bwrap, "usable"))) "usable" else "not usable"}) catch {};
-    if (truthy(get(bwrap, "version"))) o.print(a, "  version: {s}\n", .{strOf(a, get(bwrap, "version"))}) catch {};
-    if (truthy(get(bwrap, "reason"))) o.print(a, "  reason: {s}\n", .{strOf(a, get(bwrap, "reason"))}) catch {};
-    o.print(a, "user.max_user_namespaces: {s}\n", .{strOf(a, get(ns, "max_user_namespaces"))}) catch {};
-    if (get(ns, "unprivileged_userns_clone")) |v| if (v != .null) o.print(a, "kernel.unprivileged_userns_clone: {s}\n", .{strOf(a, v)}) catch {};
-    o.print(a, "user-namespace sandbox: {s}\n", .{if (truthy(get(userns, "usable"))) "usable" else "not usable"}) catch {};
-    if (truthy(get(userns, "reason"))) o.print(a, "  reason: {s}\n", .{strOf(a, get(userns, "reason"))}) catch {};
+    o.print(a, "bwrap: {s}\n", .{if (truthy(get(bwrap, "usable"))) "usable" else "not usable"}) catch oom();
+    if (truthy(get(bwrap, "version"))) o.print(a, "  version: {s}\n", .{strOf(a, get(bwrap, "version"))}) catch oom();
+    if (truthy(get(bwrap, "reason"))) o.print(a, "  reason: {s}\n", .{strOf(a, get(bwrap, "reason"))}) catch oom();
+    o.print(a, "user.max_user_namespaces: {s}\n", .{strOf(a, get(ns, "max_user_namespaces"))}) catch oom();
+    if (get(ns, "unprivileged_userns_clone")) |v| if (v != .null) o.print(a, "kernel.unprivileged_userns_clone: {s}\n", .{strOf(a, v)}) catch oom();
+    o.print(a, "user-namespace sandbox: {s}\n", .{if (truthy(get(userns, "usable"))) "usable" else "not usable"}) catch oom();
+    if (truthy(get(userns, "reason"))) o.print(a, "  reason: {s}\n", .{strOf(a, get(userns, "reason"))}) catch oom();
     const fstype = if (truthy(get(ex, "fstype"))) get(ex, "fstype") else get(fs, "fstype");
-    o.print(a, "RENAME_EXCHANGE: {s}", .{if (truthy(get(ex, "ok"))) "yes" else "no"}) catch {};
-    if (truthy(fstype)) o.print(a, " on {s}", .{strOf(a, fstype)}) catch {};
-    o.append(a, '\n') catch {};
-    if (truthy(get(ex, "error"))) o.print(a, "  {s}\n", .{strOf(a, get(ex, "error"))}) catch {};
+    o.print(a, "RENAME_EXCHANGE: {s}", .{if (truthy(get(ex, "ok"))) "yes" else "no"}) catch oom();
+    if (truthy(fstype)) o.print(a, " on {s}", .{strOf(a, fstype)}) catch oom();
+    o.append(a, '\n') catch oom();
+    if (truthy(get(ex, "error"))) o.print(a, "  {s}\n", .{strOf(a, get(ex, "error"))}) catch oom();
     if (truthy(get(eb, "found"))) {
         var rendered: []const u8 = "unknown";
         if (get(eb, "framework_version")) |v| if (truthy(v)) {
             var parts: std.ArrayList([]const u8) = .empty;
-            for (v.list) |x| parts.append(a, strOf(a, x)) catch {};
+            for (v.list) |x| parts.append(a, strOf(a, x)) catch oom();
             rendered = std.mem.join(a, ".", parts.items) catch "unknown";
         };
-        o.print(a, "EasyBuild framework: {s}\n", .{rendered}) catch {};
-        o.print(a, "  bwrap stage-path keys: {s} ({s})\n", .{ strOf(a, get(eb, "stage_path_keys")), strOf(a, get(eb, "keys_source")) }) catch {};
+        o.print(a, "EasyBuild framework: {s}\n", .{rendered}) catch oom();
+        o.print(a, "  bwrap stage-path keys: {s} ({s})\n", .{ strOf(a, get(eb, "stage_path_keys")), strOf(a, get(eb, "keys_source")) }) catch oom();
     } else {
-        o.print(a, "EasyBuild: {s}\n", .{strOf(a, get(eb, "reason"))}) catch {};
+        o.print(a, "EasyBuild: {s}\n", .{strOf(a, get(eb, "reason"))}) catch oom();
     }
     const mount = if (truthy(get(fs, "mount"))) strOf(a, get(fs, "mount")) else "";
     const fl = std.fmt.allocPrint(a, "filesystem: {s} {s}", .{ strOf(a, get(fs, "fstype")), mount }) catch "";
-    o.appendSlice(a, std.mem.trimEnd(u8, fl, " \t\n\r\x0b\x0c")) catch {};
-    o.append(a, '\n') catch {};
-    o.appendSlice(a, "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)\n") catch {};
+    o.appendSlice(a, std.mem.trimEnd(u8, fl, " \t\n\r\x0b\x0c")) catch oom();
+    o.append(a, '\n') catch oom();
+    o.appendSlice(a, "lock: local flock lock plus POSIX record lock; cross-node coherence unmeasured (open-004)\n") catch oom();
     cli.put(1, o.items);
 }
 
@@ -619,9 +620,9 @@ pub fn sandboxMain(a: Allocator, env: Env, args: []const []const u8) u8 {
             probe_only = true;
         } else if (std.mem.eql(u8, args[i], "--read-only") and i + 1 < args.len) {
             i += 1;
-            read_only.append(a, args[i]) catch {};
+            read_only.append(a, args[i]) catch oom();
         } else if (std.mem.startsWith(u8, args[i], "--read-only=")) {
-            read_only.append(a, args[i]["--read-only=".len..]) catch {};
+            read_only.append(a, args[i]["--read-only=".len..]) catch oom();
         } else break;
     }
     var command = args[i..];
