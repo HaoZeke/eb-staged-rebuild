@@ -363,3 +363,22 @@ refuse), and the fake `eb` answers `--version` with `FAKE_EB_VERSION`.
 | CliTests.test_dry_run_and_probe_and_resolve | runs against `TOOL_BIN` |
 | BwrapKeyTableTests.test_easybuild_5_4_1_writes_the_stage_path_keys | differential "probe, EasyBuild 5.4.1 stage keys" |
 | BwrapKeyTableTests.test_easybuild_5_4_1_without_the_keys_is_refused_not_guessed | differential "run, bwrap, 5.4.1 without stage keys" |
+
+## tests/test_ledger_bounded.py (the bounded `eb-stack ledger` call)
+
+`publish.zig` `bounded()` calls zig-common `proc.run` with the options `_bounded` implies: a 64 KiB stdout and stderr limit
+with the rest read and dropped (`stdout_overflow = .truncate`), `end_with_leader` and `wait_for_group`. The process-group
+tests are ported to zig-common `src/proc_test.zig` with those options; the two receipt tests run through `build-events`
+in `tests/test_ledger_bounded_cli.py`, against `TOOL_BIN` or the Python module.
+
+| test | replacement |
+|---|---|
+| test_ledger_bounded.BoundedOutputTests.test_continuous_output_is_never_stored | zig-common `src/proc_test.zig` test "continuous output is never stored and the deadline still holds" |
+| test_ledger_bounded.BoundedOutputTests.test_oversized_streams_keep_the_leading_limit_and_the_exit_code | zig-common `src/proc_test.zig` test "oversized streams keep the leading limit and the exit code" |
+| test_ledger_bounded.BoundedOutputTests.test_writing_descendants_are_stopped_when_the_leader_exits | zig-common `src/proc_test.zig` test "writing descendants are stopped when the leader exits" |
+| test_ledger_bounded.BoundedOutputTests.test_a_writer_that_left_the_group_cannot_hold_the_call_or_outlive_its_pipe | zig-common `src/proc_test.zig` test "a writer that left the group cannot hold the call or outlive its pipe" |
+| test_ledger_bounded.BoundedOutputTests.test_timeout_returns_after_every_group_member_has_exited | zig-common `src/proc_test.zig` test "a timeout returns after every group member has exited" |
+| test_ledger_bounded.BoundedOutputTests.test_interrupted_call_returns_after_every_group_member_has_exited | zig-common `src/proc_test.zig` test "an interrupted call returns after every group member has exited" (Zig: the `cancel` flag a signal handler sets, in place of Python's in-process signal) |
+| test_ledger_bounded.BoundedOutputTests.test_a_noisy_helper_cannot_outlive_a_killed_caller | zig-common `src/proc_test.zig` test "a noisy helper cannot outlive a killed caller" |
+| test_ledger_bounded.ExactReceiptTests.test_receipt_that_fills_the_output_limit_is_accepted | `tests/test_ledger_bounded_cli.py` test_receipt_that_fills_the_output_limit_is_accepted (the replay comes from a retry after `fail-after-append`) |
+| test_ledger_bounded.ExactReceiptTests.test_receipt_beyond_the_output_limit_is_not_read | `tests/test_ledger_bounded_cli.py` test_receipt_beyond_the_output_limit_is_not_read |
