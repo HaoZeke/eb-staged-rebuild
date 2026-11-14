@@ -384,10 +384,15 @@ fn publisherError(a: Allocator, comptime f: []const u8, args: anytype) error{Pub
 
 const Bounded = struct { code: u32, stdout: []const u8, stderr: []const u8 };
 
+/// The process group of the running eb-stack call, 0 between calls; a stop
+/// handler kills it, as _bounded's finally does.
+pub var ledger_pgid = std.atomic.Value(i32).init(0);
+
 /// _bounded: the program in its own process group with a deadline. The
 /// first 64 KiB of each stream is kept and the rest read and dropped; the
 /// call returns once the program exits, after its group is killed and every
-/// member has exited. A writer that left the group gets EPIPE.
+/// member has exited. A writer that left the group gets EPIPE. A program
+/// that cannot be executed is "cannot start", as Popen's OSError.
 fn bounded(a: Allocator, envp: common.proc.Envp, argv: []const []const u8, config: Py) error{ Publisher, OutOfMemory }!Bounded {
     const ms: u32 = @intFromFloat(@min(timeoutSeconds(config) * 1000, 4.0e9));
     const r = common.proc.run(a, argv[0], argv, envp, .{
@@ -398,6 +403,8 @@ fn bounded(a: Allocator, envp: common.proc.Envp, argv: []const []const u8, confi
         .grace_ms = 0,
         .end_with_leader = true,
         .wait_for_group = true,
+        .exec_error = true,
+        .pgid_out = &ledger_pgid,
     }) catch |err| switch (err) {
         error.TimedOut => return publisherError(a, "{s} {s} {s} timed out after {s}s", .{ argv[0], argv[1], argv[2], timeoutText(a, config) }),
         error.OutOfMemory => return error.OutOfMemory,

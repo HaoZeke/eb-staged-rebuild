@@ -844,6 +844,7 @@ const help = usage ++
 fn onStop(sig: linux.SIG) callconv(.c) void {
     var buf: [128]u8 = undefined;
     const m = std.fmt.bufPrint(&buf, "build-events: stopped by signal {d}; pending events stay in the outbox\n", .{@backingInt(sig)}) catch "build-events: stopped\n";
+    common.proc.stopGroup(publish.ledger_pgid.load(.seq_cst));
     cli.put(2, m);
     linux.exit_group(@intCast(128 + @backingInt(sig)));
 }
