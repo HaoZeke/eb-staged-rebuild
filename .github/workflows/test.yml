@@ -75,9 +75,10 @@ jobs:
       - run: zig fmt --check build.zig build.zig.zon zig
       - run: zig build test --summary all
       - run: zig build -Drelease=true
-      - name: the release binary cannot emulate ACLs
+      - name: the release binary carries no test hooks
         run: |
           ! grep -aq EB_STAGED_REBUILD_ACL_MODEL zig-out/bin/eb-staged-rebuild
+          ! grep -aq EB_STAGED_REBUILD_FAIL_AT zig-out/bin/eb-staged-rebuild
           ! zig build -Dtest-ops -Drelease=true
       - name: the -Dtest-ops test artifact
         run: zig build -Dtest-ops
@@ -96,5 +97,7 @@ jobs:
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python tests/differential_metadata.py
       - name: ACL publication tests against the test artifact
         run: TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python -m unittest -v tests.test_acl_publication_cli
+      - name: a run and a rollback failed at every step, against the test artifact
+        run: TOOL_BIN_TEST_OPS="$PWD/zig-out/bin/eb-staged-rebuild-test-ops" python tests/fail_matrix.py
       - name: ledger-maintenance command-line test against the binary
         run: TOOL_BIN="$PWD/zig-out/bin/eb-staged-rebuild" python -m unittest -v tests.test_ledger_maintenance.CommandLineTests
