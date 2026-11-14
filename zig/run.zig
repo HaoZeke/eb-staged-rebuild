@@ -391,11 +391,7 @@ fn build(r: *R) E!u8 {
     return rc;
 }
 
-fn selfExe(a: Allocator) []const u8 {
-    var buf: [sys.path_max]u8 = undefined;
-    const n = sys.call(linux.readlinkat, .{ linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len }) catch return "/proc/self/exe";
-    return a.dupe(u8, buf[0..n]) catch "/proc/self/exe";
-}
+const selfExe = probe.selfExe;
 
 fn enforceManifest(r: *R) E!void {
     if (r.spec.skip_live_check) return;

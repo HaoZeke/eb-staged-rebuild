@@ -99,11 +99,7 @@ fn which(a: Allocator, env: probe.Env, name: []const u8) ?[]const u8 {
     return common.proc.which(a, name, env.get("PATH") orelse "/bin:/usr/bin") catch null;
 }
 
-fn selfExe(a: Allocator) []const u8 {
-    var buf: [sys.path_max]u8 = undefined;
-    const n = sys.call(linux.readlinkat, .{ linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len }) catch return "/proc/self/exe";
-    return a.dupe(u8, buf[0..n]) catch "/proc/self/exe";
-}
+const selfExe = probe.selfExe;
 
 /// The build command each backend runs, as the dry run prints it.
 fn buildCommand(a: Allocator, env: probe.Env, spec: Spec, probes: Py, generation_root: []const u8) []const u8 {

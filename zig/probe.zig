@@ -178,7 +178,8 @@ fn probeUserNamespaces(a: Allocator) Py {
     return .{ .dict = d.items };
 }
 
-fn selfExe(a: Allocator) []const u8 {
+/// The path of this program, from /proc/self/exe.
+pub fn selfExe(a: Allocator) []const u8 {
     var buf: [sys.path_max]u8 = undefined;
     const n = sys.call(linux.readlinkat, .{ linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len }) catch return "/proc/self/exe";
     return a.dupe(u8, buf[0..n]) catch "/proc/self/exe";
@@ -267,7 +268,8 @@ fn mkdtemp(a: Allocator, dir: []const u8, prefix: []const u8) ![]const u8 {
     var tries: usize = 0;
     while (tries < 100) : (tries += 1) {
         var rnd: [8]u8 = undefined;
-        _ = linux.getrandom(&rnd, rnd.len, 0);
+        // A name from bytes getrandom did not fill would not be random.
+        _ = try sys.call(linux.getrandom, .{ &rnd, rnd.len, 0 });
         for (&rnd) |*b| b.* = alphabet[b.* % alphabet.len];
         const p = try a.print("{s}/{s}{s}", .{ dir, prefix, rnd });
         var zb: [sys.path_max:0]u8 = undefined;
